@@ -1,125 +1,76 @@
-# Zig Codebase (0.16.0)
+# gpxz — project rules
 
-## Module Map
+## Project
 
-```
-gpx.zig        ── GPX parsing (manual std.mem scanning, no XML lib)
-trace.zig      ── Trace struct: core computation (distances, elevations, slopes, peaks)
-extrema.zig    ── AMPD peak & valley detection algorithm
-climbs.zig     ── Climb segment detection (Garmin-style qualification)
-simplify.zig   ── Douglas-Peucker simplification
-elevation.zig  ── Denoised D+/D- (distance-windowed median + hysteresis deadband) + windowed slope
-gpspoint.zig   ── Pure math on [3]f64 (Haversine, bearing, elevation)
-gpxdata.zig    ── Data structs: GPXData, Waypoint, Metadata
-leg.zig        ── LegStats: per-waypoint-pair intervals (Naismith)
-section.zig    ── SectionStats struct (camelCase fields — maps to JS); thin
-                  wrappers over calibration.zig's boundary-kind generics
-stage.zig      ── StageStats: LifeBase-to-LifeBase groupings; same thin-wrapper
-                  pattern as section.zig
-calibration.zig ── Boundary-kind (section/stage) shared logic: a-priori interval
-                  stats (computeBoundaryStats) + live recalibration
-segment.zig    ── Shared per-point Minetti metrics for sections & stages
-minetti.zig    ── Metabolic-cost slope model (Minetti et al. 2002): cmet, paceFactor
-paceModel.zig  ── Full pace model: folds minetti's slope factor together with
-                  fatigue, circadian and weather into one combined multiplier
-                  (computeFactors)
-soundscape.zig ── Audio frame generation from trace arrays
-time.zig       ── ISO 8601 → epoch parsing
-```
+Minimal Zig library + CLI for GPX trail routes: parsing, distances, denoised D+/D-, climbs,
+sections and stages between typed waypoints, and a pace model that estimates durations and
+cutoff margins. Extracted from terminus's `zig/` directory (history kept with
+`git subtree split`); terminus still builds its own copy through Zigar, and the two are not
+linked yet.
 
-`readGPXComplete` → `GPXData { trace, waypoints, sections, metadata }` is the main WASM entry point.
+- `src/root.zig`: the library entry point. Re-exports every module and the main types.
+- `src/main.zig`: the CLI (`zig build run -- [--json] [--pace <s/km>] [--fatigue <k>]
+  [--life-base-stop <s>] file.gpx`). All I/O lives here. The default output is a text
+  summary; `--json` prints totals, climbs, waypoints, legs, sections and stages, without the
+  per-point arrays.
+- The library is pure and does no I/O: bytes and slices in, owned structs out.
+  - `gpx.zig`: GPX parsing by manual `std.mem` scanning (no XML library). `parse(allocator,
+    bytes, &settings)` → `GPXData { trace, waypoints, legs, sections, stages, metadata,
+    points_full_resolution }` is the main entry point. A malformed element is a
+    `ParseError`, never skipped.
+  - `pace_model.zig`'s `Settings` (base pace, fatigue coefficient, LifeBase stop, weather)
+    is passed by pointer everywhere the pace model runs; its defaults are the presets.
+  - `trace.zig`: `Trace`, parallel per-point arrays (cumulative distance, D+, D-, slopes,
+    pace factors) plus peaks, valleys and climbs. Points are `[3]f64` indexed by
+    `gps_point.zig`'s `latitude_index`, `longitude_index`, `elevation_index`.
+  - `gps_point.zig` (Haversine, bearing), `elevation.zig` (denoised D+/D-), `extrema.zig`
+    (AMPD peaks and valleys), `climbs.zig` (Garmin-style qualification), `simplify.zig`
+    (Douglas-Peucker), `time.zig` (ISO 8601 → epoch).
+  - `leg.zig`, `section.zig`, `stage.zig`: stats between waypoints; sections and stages are
+    thin wrappers over `calibration.zig` (a-priori interval stats and live recalibration).
+  - `minetti.zig` (slope cost), `pace_model.zig` (slope × fatigue × circadian × weather),
+    `segment.zig` (per-point metrics), `soundscape.zig` (audio frames, terminus-specific).
+- **Names are JSON keys**: struct fields serialize as-is in `--json` and reach JavaScript
+  through Zigar in terminus, so renaming a public field changes both outputs.
+- **Error policy**: an error is for invalid external bytes (a malformed GPX). An `assert` is
+  for library invariants, so a failed assert means a bug in gpxz, never a bad file.
+- **Targets Zig 0.16.0**: I/O needs an explicit `std.Io`, `main` takes `std.process.Init`,
+  and containers are unmanaged (`.empty` + pass the allocator on each call).
+  Don't write pre-0.16 idioms.
 
-## Core Data Model
+## Coding style: TigerBeetle (TIGER_STYLE)
 
-Coordinates are `[3]f64` with index constants from `gpspoint.zig`:
+Follow https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md. Key points:
 
-```zig
-IDX_LAT = 0, IDX_LON = 1, IDX_ELEV = 2
-```
+- **Safety > performance > developer experience**, in that order.
+- **Assertions everywhere**: at least 2 per function on average. Assert arguments, return values, pre/postconditions and invariants.
+- **Paired assertions**: check the same property in two places (e.g. before writing data and after reading it back).
+- **Memory allocation (relaxed vs. TigerBeetle)**: dynamic allocation after init is allowed.
+  Pass allocators explicitly, make ownership clear, and pair every allocation with a
+  `defer`/`errdefer` free. Sizes that come from untrusted input must still be bounded.
+- **Put a limit on everything**: every loop and queue has a fixed upper bound. No unbounded recursion.
+- **Explicit sized types** (`u32`, `u64`); avoid `usize` except for indexing.
+- **Functions ≤ 70 lines**. Keep control flow simple, centralize branching in the parent, keep leaf functions pure.
+- **Handle every error**; never discard one silently.
+- **Naming**: `snake_case` for functions and variables. No abbreviations. Put units and qualifiers last, in descending significance (`latency_ms_max`, not `max_latency_ms`).
+- **Line length ≤ 100**, and run `zig fmt`.
+- **Comments explain why**, written as full sentences.
+- **Declare variables in the smallest possible scope**, as close to use as possible.
+- **Pass large args as `*const`** to avoid copies.
 
-`Trace` holds parallel arrays (same length as `points`): `cumulativeDistances`, `cumulativeElevations`, `cumulativeElevationLoss`, `slopes`, `peaks`.
+## Negative space programming
 
-## Function Signature Pattern
+Assert what *must not* happen, in addition to what should:
+- Assert the positive space (the expected valid state) **and** the negative space (invalid states that must be impossible).
+- Assert at boundaries where valid data turns invalid (e.g. `assert(index < len)` and `assert(count <= count_max)`).
+- Prefer `unreachable` for states that can't occur. Don't write silent fallbacks.
+- Handle each case of a condition explicitly. A missing `else` should be a deliberate choice.
 
-Allocating functions take `allocator` as first arg, return `![]T`. Caller owns the result:
+## Testing: required for every change
 
-```zig
-pub fn douglasPeuckerSimplify(allocator, points: []const [3]f64, epsilon: f64) ![][3]f64
-pub fn findPeaks(allocator, signal: []const f32) ![]usize
-pub fn readTracePoints(allocator, bytes: []const u8) ![][3]f64
-```
-
-## Memory Patterns
-
-**errdefer stacking** — each allocation gets its own `errdefer` as you go:
-
-```zig
-const distances = try allocator.alloc(f64, len);
-errdefer allocator.free(distances);
-const elevations = try allocator.alloc(f64, len);
-errdefer allocator.free(elevations);
-```
-
-**errdefer for slice-of-structs** — free each element then the container:
-
-```zig
-errdefer {
-    for (waypoints.items) |*wpt| wpt.deinit(allocator);
-    waypoints.deinit(allocator);
-}
-```
-
-**toOwnedSlice + defer deinit** — safe because `toOwnedSlice` empties the list:
-
-```zig
-var list: std.ArrayList(usize) = .empty;
-defer list.deinit(allocator);
-// ... append items ...
-return try list.toOwnedSlice(allocator);
-```
-
-**Temp buffers** — allocated and freed within the same function via plain `defer`:
-
-```zig
-const elevations = try allocator.alloc(f32, len);
-defer allocator.free(elevations);
-```
-
-**deinit guards** against zero-length slices (from empty input):
-
-```zig
-if (self.points.len != 0) allocator.free(self.points);
-```
-
-## GPX Parsing Idiom
-
-Manual scanning with `std.mem.indexOfPos`. Named blocks (`blk:`) for optional extraction — `orelse break` skips the element silently:
-
-```zig
-const lat = blk: {
-    const lat_pos = std.mem.indexOfPos(u8, bytes[start..end], 0, "lat=\"") orelse break;
-    break :blk std.fmt.parseFloat(f64, bytes[s..e]) catch break;
-};
-```
-
-Strings are always `allocator.dupe(u8, slice)` — never store references into the input buffer.
-
-## Testing
-
-Co-located in each file. Named `"<subject>: <scenario>"`. Always use `std.testing.allocator`.
-
-```zig
-test "distance: known coordinates (Paris to London)" { ... }
-test "Trace with large dataset applies simplification" { ... }
-```
-
-Use `@as` for type-explicit expectations:
-
-```zig
-try testing.expectEqual(@as(usize, 3), points.len);
-try testing.expectApproxEqAbs(expected, actual, tolerance);
-```
-
-## WASM
-
-Compiled via `rollup-plugin-zigar` with `ReleaseSmall`. All `pub` declarations are exported. Return types must be Zigar-marshalable: `f64`, `f32`, `i64`, `[]u8`, slices, flat structs.
+- **Every** feature, helper or function you add ships with unit tests (`test "..." {}` blocks) in the same change.
+- Tests cover the valid space, the edge cases (0, 1, max, max+1) and the invalid space.
+- Run `zig build test --summary all` and confirm it passes before calling any work done. Plain
+  `zig build test` prints nothing on success, so the summary is what shows the pass counts.
+- CI (`.github/workflows/ci.yml`) also checks `zig fmt`, the 100-column limit and ReleaseSafe,
+  so run those locally too before pushing.

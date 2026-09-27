@@ -1,0 +1,17 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+
+# GPX files you record yourself contain your GPS tracks, so don't commit them.
+# Deliberately small test fixtures can still go in testdata/.
+*.gpx
+!testdata/**/*.gpx
+
+# Claude Code per-user settings
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
