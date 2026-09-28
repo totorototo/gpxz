@@ -58,6 +58,10 @@ pub fn parse(
     const sections = try section.sections_compute(allocator, &trace, waypoints, settings);
     errdefer if (sections) |slice| allocator.free(slice);
     const stages = try stage.stages_compute(allocator, &trace, waypoints, settings);
+    errdefer if (stages) |slice| allocator.free(slice);
+    const plan = try calibration.plan_compute(allocator, &trace, waypoints, settings);
+    // The plan has an entry per section boundary: the sections' ends, plus the first start.
+    if (plan) |entries| assert(entries.len == 0 or entries.len == sections.?.len + 1);
     // Trace.init only ever drops points, when it simplifies.
     assert(trace.points.len <= points.len);
     if (legs) |slice| assert(slice.len < waypoints.len);
@@ -68,6 +72,7 @@ pub fn parse(
         .legs = legs,
         .sections = sections,
         .stages = stages,
+        .plan = plan,
         .metadata = metadata,
         // The same allocation seen as flat f64s: [3]f64 has no padding, so the byte length
         // and alignment match and GPXData.deinit frees it as is.

@@ -11,7 +11,7 @@ linked yet.
 - `src/root.zig`: the library entry point. Re-exports every module and the main types.
 - `src/main.zig`: the CLI (`zig build run -- [--json] [--pace <s/km>] [--fatigue <k>]
   [--life-base-stop <s>] file.gpx`). All I/O lives here. The default output is a text
-  summary; `--json` prints totals, climbs, waypoints, legs, sections and stages, without the
+  summary; `--json` prints totals, climbs, waypoints, legs, sections, stages and the plan, without the
   per-point arrays.
 - The library is pure and does no I/O: bytes and slices in, owned structs out.
   - `gpx.zig`: GPX parsing by manual `std.mem` scanning (no XML library). `parse(allocator,

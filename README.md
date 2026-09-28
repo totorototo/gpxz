@@ -19,7 +19,7 @@ zig build run -- --pace 420 --fatigue 0.004 --life-base-stop 1800 route.gpx
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--json` | off | Print totals, climbs, waypoints, legs, sections and stages as JSON |
+| `--json` | off | Print totals, climbs, waypoints, legs, sections, stages and the plan (per-checkpoint ETAs) as JSON |
 | `--pace <s/km>` | 500 (8:20/km) | Flat-terrain base pace |
 | `--fatigue <k>` | 0.002 | Cumulative fatigue coefficient |
 | `--life-base-stop <s>` | 3600 | Planned stop at each LifeBase |

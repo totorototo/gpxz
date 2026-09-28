@@ -29,6 +29,7 @@ pub const ClimbStats = climbs.ClimbStats;
 pub const LegStats = leg.LegStats;
 pub const SectionStats = section.SectionStats;
 pub const StageStats = stage.StageStats;
+pub const PlanEntry = calibration.PlanEntry;
 pub const WeatherLookup = pace_model.WeatherLookup;
 pub const Settings = pace_model.Settings;
 pub const ParseError = gpx.ParseError;

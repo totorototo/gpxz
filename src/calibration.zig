@@ -17,7 +17,11 @@ const assert = std.debug.assert;
 const testing = std.testing;
 const Trace = @import("trace.zig").Trace;
 const Waypoint = @import("gpx_data.zig").Waypoint;
-const bearing_to = @import("gps_point.zig").bearing_to;
+const gps_point = @import("gps_point.zig");
+const bearing_to = gps_point.bearing_to;
+const latitude_index = gps_point.latitude_index;
+const longitude_index = gps_point.longitude_index;
+const elevation_index = gps_point.elevation_index;
 const pace_model = @import("pace_model.zig");
 const segment = @import("segment.zig");
 const elevation = @import("elevation.zig");
@@ -332,6 +336,148 @@ fn life_base_recover(end: *const Waypoint, progress: *segment.Progress) void {
     const before = progress.distance_m_effort;
     progress.distance_m_effort *= (1.0 - pace_model.life_base_recovery_ratio);
     assert(progress.distance_m_effort <= before);
+}
+
+/// One checkpoint of the a-priori race plan: where it is on the trace, and when the runner
+/// reaches and leaves it. The plan has one entry per resolved section boundary, the Start
+/// included, so it answers "when am I at X" without summing sections by hand.
+pub const PlanEntry = struct {
+    name: []const u8,
+    /// `<type>`: "Start", "TimeBarrier", "LifeBase", "Arrival", or another typed checkpoint.
+    type_name: ?[]const u8,
+    /// The trace point the checkpoint resolves to.
+    index: usize,
+    /// That trace point's coordinates. They are the trace's, not the waypoint's: a waypoint
+    /// sits a few meters off the trail and its `<ele>` is optional, while every trace point
+    /// has an elevation.
+    latitude: f64,
+    longitude: f64,
+    elevation_m: f64,
+    /// Along the trace from the first checkpoint, and the D+ and D- over that distance.
+    distance_m: f64,
+    elevation_gain_m: f64,
+    elevation_loss_m: f64,
+    /// Race time on arrival: the moving time plus every planned stop before this checkpoint.
+    duration_s_arrival: f64,
+    /// The planned stop here: `<stopDuration>`, else the default at a LifeBase, else 0.
+    stop_s: f64,
+    /// Arrival plus the stop here.
+    duration_s_departure: f64,
+    /// The first checkpoint's `<time>` plus the arrival duration, or null without a start time.
+    epoch_s_arrival: ?i64,
+    /// This checkpoint's `<time>`: its cutoff, or the start time at the first checkpoint.
+    epoch_s_cutoff: ?i64,
+    /// The time allowed until the cutoff minus the departure duration: below 0, the cutoff is
+    /// missed. Null without both a start time and a cutoff.
+    margin_s: ?f64,
+};
+
+/// Returns the race plan: an entry per section boundary that resolves onto the trace, in race
+/// order, or null with fewer than two section boundaries. It runs the same model as
+/// `intervals_compute` over the same ranges, so an entry's departure is the sum of the
+/// sections' estimated durations up to it. The caller owns the result.
+pub fn plan_compute(
+    allocator: std.mem.Allocator,
+    trace: *const Trace,
+    waypoints: []const Waypoint,
+    settings: *const pace_model.Settings,
+) !?[]PlanEntry {
+    settings.assert_valid();
+    const boundaries = try boundaries_collect(allocator, waypoints, .section);
+    defer allocator.free(boundaries);
+    if (boundaries.len < 2) return null;
+    const ranges = try ranges_resolve(allocator, trace, boundaries);
+    defer allocator.free(ranges);
+    // Without a single resolved range there is no checkpoint to place, not even the first.
+    if (ranges.len == 0) return try allocator.alloc(PlanEntry, 0);
+
+    const plan = try allocator.alloc(PlanEntry, ranges.len + 1);
+    errdefer allocator.free(plan);
+    const origin: PlanOrigin = .{
+        .index = ranges[0].index_start,
+        .epoch_s = ranges[0].start.epoch_s,
+    };
+    const model: segment.Model = .{
+        .pace_s_per_km = settings.pace_base_s_per_km,
+        .fatigue_coefficient = settings.fatigue_coefficient,
+        .clock_start_s = origin.epoch_s,
+    };
+    var progress: segment.Progress = .{};
+    var departure_s: f64 = 0.0;
+    var index_previous = origin.index;
+    plan[0] = plan_entry(trace, &ranges[0].start, origin.index, &origin, 0.0, 0.0);
+    for (ranges, plan[1..]) |*range, *entry| {
+        // ranges_resolve searches each range after the previous one, so they never overlap.
+        assert(range.index_start >= index_previous);
+        assert(range.index_end > index_previous);
+        // Between two ranges lies a pair that didn't resolve: the model runs across it too,
+        // so the plan's clock doesn't drop that stretch of trail.
+        const weather = settings.weather.find(range.end.name);
+        const metrics = segment.metrics_compute(
+            trace,
+            index_previous,
+            range.index_end,
+            model,
+            weather,
+            &progress,
+        );
+        life_base_recover(&range.end, &progress);
+        const stop_s = stop_s_planned(&range.end, settings.life_base_stop_s);
+        const arrival_s = departure_s + metrics.duration_s;
+        entry.* = plan_entry(trace, &range.end, range.index_end, &origin, arrival_s, stop_s);
+        departure_s = entry.duration_s_departure;
+        index_previous = range.index_end;
+    }
+    assert(plan[plan.len - 1].duration_s_departure == departure_s);
+    return plan;
+}
+
+/// Where the plan's distances and times count from: the first resolved checkpoint.
+const PlanOrigin = struct { index: usize, epoch_s: ?i64 };
+
+fn plan_entry(
+    trace: *const Trace,
+    waypoint: *const Waypoint,
+    index: usize,
+    origin: *const PlanOrigin,
+    arrival_s: f64,
+    stop_s: f64,
+) PlanEntry {
+    assert(index >= origin.index and index < trace.points.len);
+    assert(arrival_s >= 0 and std.math.isFinite(arrival_s));
+    assert(stop_s >= 0);
+    const departure_s = arrival_s + stop_s;
+    const point = trace.points[index];
+    const epoch_s_start = origin.epoch_s;
+    const epoch_s_cutoff = waypoint.epoch_s;
+    return .{
+        .name = waypoint.name,
+        .type_name = waypoint.type_name,
+        .index = index,
+        .latitude = point[latitude_index],
+        .longitude = point[longitude_index],
+        .elevation_m = point[elevation_index],
+        .distance_m = trace.distances_m_cumulative[index] -
+            trace.distances_m_cumulative[origin.index],
+        .elevation_gain_m = trace.elevation_gains_m_cumulative[index] -
+            trace.elevation_gains_m_cumulative[origin.index],
+        .elevation_loss_m = trace.elevation_losses_m_cumulative[index] -
+            trace.elevation_losses_m_cumulative[origin.index],
+        .duration_s_arrival = arrival_s,
+        .stop_s = stop_s,
+        .duration_s_departure = departure_s,
+        .epoch_s_arrival = if (epoch_s_start) |start|
+            start + @as(i64, @intFromFloat(@round(arrival_s)))
+        else
+            null,
+        .epoch_s_cutoff = epoch_s_cutoff,
+        // Against the departure, like `cutoff_ratio`: a barrier closes on runners still in
+        // the checkpoint, not only on those yet to reach it.
+        .margin_s = if (epoch_s_start != null and epoch_s_cutoff != null)
+            @as(f64, @floatFromInt(epoch_s_cutoff.? - epoch_s_start.?)) - departure_s
+        else
+            null,
+    };
 }
 
 /// One interval's recalibrated ETA, relative to the runner's current position.
@@ -772,6 +918,142 @@ test "recalibrate: on a loop, the Arrival resolves to the end of the trace" {
     defer result.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), result.etas.len);
     try testing.expectEqual(@as(usize, 20), result.etas[0].index_end);
+}
+
+fn plan_route(
+    trace: *const Trace,
+    waypoints: []const Waypoint,
+    settings: *const pace_model.Settings,
+) ![]PlanEntry {
+    return (try plan_compute(testing.allocator, trace, waypoints, settings)).?;
+}
+
+test "plan_compute: null with fewer than 2 boundaries" {
+    var trace = try route_flat(testing.allocator);
+    defer trace.deinit(testing.allocator);
+    const allocator = testing.allocator;
+    try testing.expect(try plan_compute(allocator, &trace, &.{}, &settings_no_stop) == null);
+    const one = route_waypoints[0..1];
+    try testing.expect(try plan_compute(allocator, &trace, one, &settings_no_stop) == null);
+}
+
+test "plan_compute: empty when no pair resolves" {
+    var trace = try route_flat(testing.allocator);
+    defer trace.deinit(testing.allocator);
+    // Both boundaries resolve to the last point: the only pair runs backwards.
+    const waypoints = [_]Waypoint{
+        waypoint_test(0.029, 0.0, "Start", "Start", null),
+        waypoint_test(0.029, 0.0, "Arrival", "Arrival", null),
+    };
+    const plan = try plan_route(&trace, &waypoints, &settings_no_stop);
+    defer testing.allocator.free(plan);
+    try testing.expectEqual(@as(usize, 0), plan.len);
+}
+
+test "plan_compute: agrees with the sections it is built beside" {
+    var trace = try route_flat(testing.allocator);
+    defer trace.deinit(testing.allocator);
+    // A LifeBase stop, so the departures differ from the arrivals.
+    const settings: pace_model.Settings = .{ .life_base_stop_s = 1800 };
+    const waypoints = &route_waypoints;
+    const plan = try plan_route(&trace, waypoints, &settings);
+    defer testing.allocator.free(plan);
+    const sections = (try intervals_compute(
+        SectionStats,
+        .section,
+        testing.allocator,
+        &trace,
+        waypoints,
+        &settings,
+    )).?;
+    defer testing.allocator.free(sections);
+
+    try testing.expectEqual(sections.len + 1, plan.len);
+    try testing.expectEqualStrings("Start", plan[0].name);
+    try testing.expectEqual(@as(f64, 0.0), plan[0].distance_m);
+    try testing.expectEqual(@as(f64, 0.0), plan[0].duration_s_departure);
+    var distance_m: f64 = 0.0;
+    var duration_s: f64 = 0.0;
+    for (sections, plan[1..], waypoints[1..]) |interval, entry, waypoint| {
+        distance_m += interval.distance_m;
+        duration_s += interval.duration_s_estimated;
+        try testing.expectEqualStrings(waypoint.name, entry.name);
+        try testing.expectEqualStrings(waypoint.type_name.?, entry.type_name.?);
+        try testing.expectEqual(interval.index_end, entry.index);
+        try testing.expectEqual(interval.point_end[latitude_index], entry.latitude);
+        try testing.expectEqual(interval.point_end[longitude_index], entry.longitude);
+        try testing.expectEqual(interval.point_end[elevation_index], entry.elevation_m);
+        try testing.expectApproxEqAbs(distance_m, entry.distance_m, 1e-6);
+        try testing.expectApproxEqAbs(duration_s, entry.duration_s_departure, 1e-6);
+        try testing.expect(entry.duration_s_arrival > 0.0);
+    }
+}
+
+test "plan_compute: stops only at LifeBases by default, and only past them" {
+    var trace = try route_flat(testing.allocator);
+    defer trace.deinit(testing.allocator);
+    const settings: pace_model.Settings = .{ .life_base_stop_s = 1800 };
+    const plan = try plan_route(&trace, &route_waypoints, &settings);
+    defer testing.allocator.free(plan);
+    const no_stop = try plan_route(&trace, &route_waypoints, &settings_no_stop);
+    defer testing.allocator.free(no_stop);
+
+    // Start, TB1, LB1, LB2, Arrival.
+    const stops_s = [_]f64{ 0, 0, 1800, 1800, 0 };
+    for (plan, no_stop, stops_s, 0..) |entry, bare, stop_s, index| {
+        try testing.expectEqual(stop_s, entry.stop_s);
+        try testing.expectEqual(entry.duration_s_arrival + stop_s, entry.duration_s_departure);
+        // LifeBase recovery applies with or without a stop, and no start time keeps the
+        // circadian factor neutral, so the stops shift later arrivals by exactly their sum.
+        const stops_before_s: f64 = if (index <= 2) 0 else if (index == 3) 1800 else 3600;
+        const delay_s = entry.duration_s_arrival - bare.duration_s_arrival;
+        try testing.expectApproxEqAbs(stops_before_s, delay_s, 1e-6);
+    }
+}
+
+test "plan_compute: epochs and cutoff margins" {
+    var trace = try route_flat(testing.allocator);
+    defer trace.deinit(testing.allocator);
+    const start_s: i64 = 1_700_000_000;
+    // TB1 allows an hour, far more than 5 flat points; LB1 allows one second.
+    var waypoints = [_]Waypoint{
+        waypoint_test(0.000, 0.0, "Start", "Start", start_s),
+        waypoint_test(0.005, 0.0, "TB1", "TimeBarrier", start_s + 3600),
+        waypoint_test(0.010, 0.0, "LB1", "LifeBase", start_s + 1),
+        waypoint_test(0.029, 0.0, "Arrival", "Arrival", null),
+    };
+    // A stop at TB1 tells the departure, which the margin counts against, from the arrival.
+    waypoints[1].stop_s = 600;
+    const plan = try plan_route(&trace, &waypoints, &settings_no_stop);
+    defer testing.allocator.free(plan);
+
+    try testing.expectEqual(@as(usize, 4), plan.len);
+    try testing.expectEqual(@as(?i64, start_s), plan[0].epoch_s_arrival);
+    try testing.expectEqual(@as(?f64, 0.0), plan[0].margin_s);
+    const arrival_s: i64 = @intFromFloat(@round(plan[1].duration_s_arrival));
+    try testing.expectEqual(@as(?i64, start_s + arrival_s), plan[1].epoch_s_arrival);
+    const departure_s = plan[1].duration_s_arrival + 600;
+    try testing.expectApproxEqAbs(3600 - departure_s, plan[1].margin_s.?, 1e-9);
+    try testing.expect(plan[1].margin_s.? > 0.0);
+    try testing.expect(plan[2].margin_s.? < 0.0);
+    // No cutoff at the Arrival: an arrival time, but no margin.
+    try testing.expect(plan[3].epoch_s_arrival != null);
+    try testing.expectEqual(@as(?f64, null), plan[3].margin_s);
+}
+
+test "plan_compute: no start time, no epochs and no margins" {
+    var trace = try route_flat(testing.allocator);
+    defer trace.deinit(testing.allocator);
+    // A cutoff alone can't give a margin: it needs a start to count from.
+    var waypoints = route_waypoints;
+    waypoints[1].epoch_s = 1_700_000_000;
+    const plan = try plan_route(&trace, &waypoints, &settings_no_stop);
+    defer testing.allocator.free(plan);
+    for (plan) |entry| {
+        try testing.expectEqual(@as(?i64, null), entry.epoch_s_arrival);
+        try testing.expectEqual(@as(?f64, null), entry.margin_s);
+    }
+    try testing.expectEqual(@as(?i64, 1_700_000_000), plan[1].epoch_s_cutoff);
 }
 
 test "difficulty_from_pace_factor: each threshold" {

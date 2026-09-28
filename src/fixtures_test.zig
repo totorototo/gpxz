@@ -54,6 +54,10 @@ fn fixture_check(bytes: []const u8, expected: *const Expected) !void {
     // Every waypoint is typed, so each one bounds a section; LifeBases also bound stages.
     try testing.expectEqual(data.waypoints.len - 1, data.sections.?.len);
     try testing.expectEqual(@as(usize, expected.life_bases + 1), data.stages.?.len);
+    // The plan has a line per checkpoint, the Start included, and ends at the Arrival.
+    const plan = data.plan.?;
+    try testing.expectEqual(data.waypoints.len, plan.len);
+    try testing.expectEqualStrings("Arrival", plan[plan.len - 1].type_name.?);
 
     const trace = &data.trace;
     const distance_km = trace.distance_m / 1000.0;

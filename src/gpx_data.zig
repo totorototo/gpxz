@@ -7,6 +7,7 @@ const testing = std.testing;
 const LegStats = @import("leg.zig").LegStats;
 const SectionStats = @import("section.zig").SectionStats;
 const StageStats = @import("stage.zig").StageStats;
+const PlanEntry = @import("calibration.zig").PlanEntry;
 const Trace = @import("trace.zig").Trace;
 
 pub const Metadata = struct {
@@ -90,6 +91,8 @@ pub const GPXData = struct {
     /// Between consecutive section and stage boundaries; null with fewer than 2 of them.
     sections: ?[]const SectionStats,
     stages: ?[]const StageStats,
+    /// When the runner reaches and leaves each section boundary; null like `sections`.
+    plan: ?[]const PlanEntry,
     metadata: Metadata,
     /// Every track point, unsimplified, as [lat, lon, ele, lat, lon, ele, ...], so Zigar
     /// hands JavaScript one Float64Array for full-resolution rendering, not a proxy per point.
@@ -105,6 +108,7 @@ pub const GPXData = struct {
         if (self.legs) |legs| allocator.free(legs);
         if (self.sections) |sections| allocator.free(sections);
         if (self.stages) |stages| allocator.free(stages);
+        if (self.plan) |plan| allocator.free(plan);
         self.* = undefined;
     }
 };

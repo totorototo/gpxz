@@ -12,7 +12,7 @@ const arguments_max = 16;
 const usage =
     \\usage: gpxz [--json] [--pace <s/km>] [--fatigue <k>] [--life-base-stop <s>] <file.gpx>
     \\  --json             print the route (totals, climbs, waypoints, legs, sections,
-    \\                     stages) as JSON on stdout instead of the text summary
+    \\                     stages, plan) as JSON on stdout instead of the text summary
     \\  --pace             flat-terrain base pace in seconds per km (default 500 = 8:20/km)
     \\  --fatigue          cumulative fatigue coefficient (default 0.002)
     \\  --life-base-stop   planned stop at each LifeBase in seconds (default 3600)
@@ -40,6 +40,7 @@ const Report = struct {
     legs: ?[]const gpxz.LegStats,
     sections: ?[]const gpxz.SectionStats,
     stages: ?[]const gpxz.StageStats,
+    plan: ?[]const gpxz.PlanEntry,
 
     fn from_data(data: *const gpxz.GPXData) Report {
         const report: Report = .{
@@ -54,6 +55,7 @@ const Report = struct {
             .legs = data.legs,
             .sections = data.sections,
             .stages = data.stages,
+            .plan = data.plan,
         };
         assert(report.distance_m >= 0);
         assert(report.climbs.len <= report.point_count);
@@ -214,6 +216,37 @@ fn summary_write(writer: *std.Io.Writer, data: *const gpxz.GPXData) std.Io.Write
         try writer.print("\nsections ({d})\n", .{sections.len});
         for (sections) |interval| try interval_write(writer, interval);
     }
+    if (data.plan) |plan| {
+        try writer.print("\nplan ({d})\n", .{plan.len});
+        for (plan) |*entry| try plan_entry_write(writer, entry);
+    }
+}
+
+/// One line per checkpoint: where it is, when the runner arrives, and the margin on its
+/// cutoff when it has one.
+fn plan_entry_write(
+    writer: *std.Io.Writer,
+    entry: *const gpxz.PlanEntry,
+) std.Io.Writer.Error!void {
+    assert(entry.distance_m >= 0);
+    assert(entry.duration_s_departure >= entry.duration_s_arrival);
+    try writer.print("  km {d:>6.1}  +{d:>5.0} m  at ", .{
+        entry.distance_m / 1000.0,
+        entry.elevation_gain_m,
+    });
+    try duration_write(writer, entry.duration_s_arrival);
+    if (entry.stop_s > 0) {
+        try writer.writeAll(" (stop ");
+        try duration_write(writer, entry.stop_s);
+        try writer.writeByte(')');
+    }
+    try writer.print("  {s}", .{entry.name});
+    if (entry.margin_s) |margin_s| {
+        try writer.writeAll("  margin ");
+        if (margin_s < 0) try writer.writeByte('-');
+        try duration_write(writer, @abs(margin_s));
+    }
+    try writer.writeByte('\n');
 }
 
 /// One line per section or stage. `interval` is a SectionStats or a StageStats, which share
@@ -296,6 +329,40 @@ test "duration_write: rounds to the minute" {
     defer out.deinit();
     try duration_write(&out.writer, 3 * 3600 + 5 * 60 + 31);
     try std.testing.expectEqualStrings("3h06", out.written());
+}
+
+test "plan_entry_write: stop and a missed cutoff" {
+    const entry: gpxz.PlanEntry = .{
+        .name = "LB1",
+        .type_name = "LifeBase",
+        .index = 10,
+        .latitude = 45.0,
+        .longitude = 6.0,
+        .elevation_m = 1200.0,
+        .distance_m = 42_195,
+        .elevation_gain_m = 2400,
+        .elevation_loss_m = 2000,
+        .duration_s_arrival = 6 * 3600 + 30 * 60,
+        .stop_s = 3600,
+        .duration_s_departure = 7 * 3600 + 30 * 60,
+        .epoch_s_arrival = null,
+        .epoch_s_cutoff = null,
+        .margin_s = -15 * 60,
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try plan_entry_write(&out.writer, &entry);
+    const expected = "  km   42.2  + 2400 m  at 6h30 (stop 1h00)  LB1  margin -0h15\n";
+    try std.testing.expectEqualStrings(expected, out.written());
+
+    // No stop and no cutoff: neither is printed.
+    var bare = entry;
+    bare.stop_s = 0;
+    bare.duration_s_departure = bare.duration_s_arrival;
+    bare.margin_s = null;
+    out.clearRetainingCapacity();
+    try plan_entry_write(&out.writer, &bare);
+    try std.testing.expectEqualStrings("  km   42.2  + 2400 m  at 6h30  LB1\n", out.written());
 }
 
 const test_gpx =
