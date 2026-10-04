@@ -1,5 +1,6 @@
 //! Climbs: each peak paired with the valley before it, kept only when it qualifies the way
-//! Garmin's ClimbPro does.
+//! Garmin's ClimbPro does. Descents: the climbs of the profile mirrored upside down, so they
+//! qualify by the same rules.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -12,6 +13,18 @@ pub const ClimbStats = struct {
     distance_m: f64,
     elevation_gain_m: f64,
     elevation_m_summit: f64,
+    gradient_percent_average: f64,
+};
+
+/// From a top down to a bottom: a climb of the mirrored profile, the drop measured as a loss.
+pub const DescentStats = struct {
+    index_start: usize,
+    index_end: usize,
+    distance_m_start: f64,
+    distance_m: f64,
+    elevation_loss_m: f64,
+    elevation_m_top: f64,
+    /// The average drop over distance, as a positive percent.
     gradient_percent_average: f64,
 };
 
@@ -67,6 +80,71 @@ pub fn climbs_detect(
     }
     assert(climbs.items.len <= peaks.len);
     return climbs.toOwnedSlice(allocator);
+}
+
+/// Returns the descents that end at each valley, in order: the climbs of the profile turned
+/// upside down, where the valleys are the peaks. A descent qualifies by the climbs' rules
+/// (length, gradient, score), so a long gentle run-out isn't one and a steep drop is.
+/// why: mirroring, not a second detector: one set of rules can't drift from the other. The
+/// caller owns the result.
+pub fn descents_detect(
+    allocator: std.mem.Allocator,
+    peaks: []const usize,
+    valleys: []const usize,
+    points: []const [3]f64,
+    distances_m: []const f64,
+) ![]DescentStats {
+    assert(points.len == distances_m.len);
+    const mirrored = try allocator.alloc([3]f64, points.len);
+    defer allocator.free(mirrored);
+    for (points, mirrored) |point, *flipped| flipped.* = .{ point[0], point[1], -point[2] };
+    const bottoms = try bottoms_with_finish(allocator, peaks, valleys, points);
+    defer allocator.free(bottoms);
+    const climbs = try climbs_detect(allocator, bottoms, peaks, mirrored, distances_m);
+    defer allocator.free(climbs);
+
+    const descents = try allocator.alloc(DescentStats, climbs.len);
+    for (climbs, descents) |*climb, *descent| {
+        descent.* = .{
+            .index_start = climb.index_start,
+            .index_end = climb.index_end,
+            .distance_m_start = climb.distance_m_start,
+            .distance_m = climb.distance_m,
+            .elevation_loss_m = climb.elevation_gain_m,
+            .elevation_m_top = points[climb.index_start][2],
+            .gradient_percent_average = climb.gradient_percent_average,
+        };
+        // Paired with the mirroring: each descent ends lower than it starts, by its loss.
+        const drop_m = points[descent.index_start][2] - points[descent.index_end][2];
+        assert(drop_m >= 0 and @abs(drop_m - descent.elevation_loss_m) < 1e-9);
+    }
+    assert(descents.len <= bottoms.len);
+    return descents;
+}
+
+/// The valleys, plus the trail's last point when it lies below the last peak and no valley
+/// follows that peak. why: the twin of the climbs' rule that a climb with no valley before it
+/// starts at the trail start. The peak detector never returns an end point, and a race that
+/// runs down to its finish ends on the longest descent of all; a summit finish is rare, so
+/// climbs don't need the rule. The caller owns the result.
+fn bottoms_with_finish(
+    allocator: std.mem.Allocator,
+    peaks: []const usize,
+    valleys: []const usize,
+    points: []const [3]f64,
+) ![]usize {
+    assert(std.sort.isSorted(usize, valleys, {}, std.sort.asc(usize)));
+    if (points.len == 0 or peaks.len == 0) return allocator.dupe(usize, valleys);
+    const last = points.len - 1;
+    const peak_last = peaks[peaks.len - 1];
+    const valley_after = valleys.len > 0 and valleys[valleys.len - 1] > peak_last;
+    const finish_low = peak_last < last and points[last][2] < points[peak_last][2];
+    if (valley_after or !finish_low) return allocator.dupe(usize, valleys);
+    const bottoms = try allocator.alloc(usize, valleys.len + 1);
+    @memcpy(bottoms[0..valleys.len], valleys);
+    bottoms[valleys.len] = last;
+    assert(std.sort.isSorted(usize, bottoms, {}, std.sort.asc(usize)));
+    return bottoms;
 }
 
 fn climb_stats(
@@ -270,4 +348,106 @@ test "lowest_index: the range is half-open, and empty returns null" {
     try testing.expectEqual(@as(?usize, 2), lowest_index(&points, 2, 3));
     try testing.expectEqual(@as(?usize, null), lowest_index(&points, 2, 2));
     try testing.expectEqual(@as(?usize, null), lowest_index(&points, 3, 2));
+}
+
+test "descents_detect: one valley from a peak, the drop as a loss" {
+    const points = [_][3]f64{
+        .{ 0.0, 0.0, 500.0 }, // Peak.
+        .{ 0.0, 0.1, 450.0 },
+        .{ 0.0, 0.2, 350.0 },
+        .{ 0.0, 0.3, 200.0 },
+        .{ 0.0, 0.4, 100.0 }, // Valley.
+    };
+    const distances_m = [_]f64{ 0.0, 1000.0, 2000.0, 3000.0, 4000.0 };
+    const descents = try descents_detect(testing.allocator, &.{0}, &.{4}, &points, &distances_m);
+    defer testing.allocator.free(descents);
+
+    try testing.expectEqual(@as(usize, 1), descents.len);
+    try testing.expectEqual(DescentStats{
+        .index_start = 0,
+        .index_end = 4,
+        .distance_m_start = 0.0,
+        .distance_m = 4000.0,
+        .elevation_loss_m = 400.0,
+        .elevation_m_top = 500.0,
+        .gradient_percent_average = 10.0,
+    }, descents[0]);
+}
+
+test "descents_detect: no valleys, no descents; a short drop doesn't qualify" {
+    // Up to the finish: no valley, and the finish no bottom either.
+    const points = [_][3]f64{ .{ 0.0, 0.0, 200.0 }, .{ 0.0, 0.1, 300.0 } };
+    const distances_m = [_]f64{ 0.0, 1000.0 };
+    const none = try descents_detect(testing.allocator, &.{0}, &.{}, &points, &distances_m);
+    defer testing.allocator.free(none);
+    try testing.expectEqual(@as(usize, 0), none.len);
+
+    // 400 m at 25 %: under the 500 m minimum, as a climb would be.
+    const short = [_][3]f64{ .{ 0.0, 0.0, 200.0 }, .{ 0.0, 0.1, 100.0 } };
+    const short_m = [_]f64{ 0.0, 400.0 };
+    const dropped = try descents_detect(testing.allocator, &.{0}, &.{1}, &short, &short_m);
+    defer testing.allocator.free(dropped);
+    try testing.expectEqual(@as(usize, 0), dropped.len);
+}
+
+test "descents_detect: a climb's mirror image is a descent of the same shape" {
+    const up = [_][3]f64{
+        .{ 0.0, 0.0, 100.0 },
+        .{ 0.0, 0.1, 300.0 },
+        .{ 0.0, 0.2, 600.0 }, // Peak.
+        .{ 0.0, 0.3, 350.0 },
+        .{ 0.0, 0.4, 120.0 }, // Valley.
+    };
+    const distances_m = [_]f64{ 0.0, 1000.0, 2000.0, 3000.0, 4000.0 };
+    const climbs = try climbs_detect(testing.allocator, &.{2}, &.{0}, &up, &distances_m);
+    defer testing.allocator.free(climbs);
+    const descents = try descents_detect(testing.allocator, &.{2}, &.{ 0, 4 }, &up, &distances_m);
+    defer testing.allocator.free(descents);
+    try testing.expectEqual(@as(usize, 1), climbs.len);
+    try testing.expectEqual(@as(usize, 1), descents.len);
+    try testing.expectEqual(@as(usize, 2), descents[0].index_start);
+    try testing.expectEqual(@as(usize, 4), descents[0].index_end);
+    try testing.expectEqual(@as(f64, 480.0), descents[0].elevation_loss_m);
+    try testing.expectEqual(@as(f64, 600.0), descents[0].elevation_m_top);
+}
+
+test "descents_detect: a run down to the finish ends at the finish" {
+    // The last valley is at 1; the trail then climbs to a peak at 3 and runs down to the end,
+    // where the peak detector finds no valley.
+    const points = [_][3]f64{
+        .{ 0.0, 0.0, 300.0 },
+        .{ 0.0, 0.1, 100.0 }, // Valley.
+        .{ 0.0, 0.2, 400.0 },
+        .{ 0.0, 0.3, 900.0 }, // Peak.
+        .{ 0.0, 0.4, 600.0 },
+        .{ 0.0, 0.5, 300.0 }, // The finish.
+    };
+    const distances_m = [_]f64{ 0.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0 };
+    const descents = try descents_detect(testing.allocator, &.{3}, &.{1}, &points, &distances_m);
+    defer testing.allocator.free(descents);
+    const last = descents[descents.len - 1];
+    try testing.expectEqual(@as(usize, 3), last.index_start);
+    try testing.expectEqual(@as(usize, 5), last.index_end);
+    try testing.expectEqual(@as(f64, 600.0), last.elevation_loss_m);
+}
+
+test "bottoms_with_finish: only a finish below the last peak, with no valley after it" {
+    const points = [_][3]f64{ .{ 0, 0, 100 }, .{ 0, 0, 500 }, .{ 0, 0, 200 }, .{ 0, 0, 300 } };
+    const Case = struct { peaks: []const usize, valleys: []const usize, expected: []const usize };
+    const cases = [_]Case{
+        // Below the peak at 1, no valley after it: the finish joins.
+        .{ .peaks = &.{1}, .valleys = &.{0}, .expected = &.{ 0, 3 } },
+        // A valley after the last peak already ends the descent.
+        .{ .peaks = &.{1}, .valleys = &.{ 0, 2 }, .expected = &.{ 0, 2 } },
+        // No peak: nothing to come down from.
+        .{ .peaks = &.{}, .valleys = &.{0}, .expected = &.{0} },
+        // The finish is the peak itself.
+        .{ .peaks = &.{3}, .valleys = &.{0}, .expected = &.{0} },
+    };
+    for (cases) |case| {
+        const bottoms =
+            try bottoms_with_finish(testing.allocator, case.peaks, case.valleys, &points);
+        defer testing.allocator.free(bottoms);
+        try testing.expectEqualSlices(usize, case.expected, bottoms);
+    }
 }

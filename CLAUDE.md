@@ -2,7 +2,7 @@
 
 ## Project
 
-Minimal Zig library + CLI for GPX trail routes: parsing, distances, denoised D+/D-, climbs,
+Minimal Zig library + CLI for GPX trail routes: parsing, distances, denoised D+/D-, climbs and descents,
 sections and stages between typed waypoints, and a pace model that estimates durations and
 cutoff margins. Extracted from terminus's `zig/` directory (history kept with
 `git subtree split`); terminus still builds its own copy through Zigar, and the two are not
@@ -11,7 +11,7 @@ linked yet.
 - `src/root.zig`: the library entry point. Re-exports every module and the main types.
 - `src/main.zig`: the CLI (`zig build run -- [--json] [--pace <s/km>] [--fatigue <k>]
   [--life-base-stop <s>] file.gpx`). All I/O lives here. The default output is a text
-  summary; `--json` prints totals, climbs, waypoints, legs, sections, stages and the plan, without the
+  summary; `--json` prints totals, climbs, descents, waypoints, legs, sections, stages and the plan, without the
   per-point arrays.
 - The library is pure and does no I/O: bytes and slices in, owned structs out.
   - `gpx.zig`: GPX parsing by manual `std.mem` scanning (no XML library). `parse(allocator,
@@ -21,10 +21,10 @@ linked yet.
   - `pace_model.zig`'s `Settings` (base pace, fatigue coefficient, LifeBase stop, weather)
     is passed by pointer everywhere the pace model runs; its defaults are the presets.
   - `trace.zig`: `Trace`, parallel per-point arrays (cumulative distance, D+, D-, slopes,
-    pace factors) plus peaks, valleys and climbs. Points are `[3]f64` indexed by
+    pace factors) plus peaks, valleys, climbs and descents. Points are `[3]f64` indexed by
     `gps_point.zig`'s `latitude_index`, `longitude_index`, `elevation_index`.
   - `gps_point.zig` (Haversine, bearing), `elevation.zig` (denoised D+/D-), `extrema.zig`
-    (AMPD peaks and valleys), `climbs.zig` (Garmin-style qualification), `simplify.zig`
+    (AMPD peaks and valleys), `climbs.zig` (Garmin-style qualification; descents as the mirrored profile's climbs), `simplify.zig`
     (Douglas-Peucker), `time.zig` (ISO 8601 → epoch).
   - `leg.zig`, `section.zig`, `stage.zig`: stats between waypoints; sections and stages are
     thin wrappers over `calibration.zig` (a-priori interval stats and live recalibration).

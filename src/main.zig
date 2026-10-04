@@ -11,7 +11,7 @@ const arguments_max = 16;
 
 const usage =
     \\usage: gpxz [--json] [--pace <s/km>] [--fatigue <k>] [--life-base-stop <s>] <file.gpx>
-    \\  --json             print the route (totals, climbs, waypoints, legs, sections,
+    \\  --json             print the route (totals, climbs, descents, waypoints, legs, sections,
     \\                     stages, plan) as JSON on stdout instead of the text summary
     \\  --pace             flat-terrain base pace in seconds per km (default 500 = 8:20/km)
     \\  --fatigue          cumulative fatigue coefficient (default 0.002)
@@ -36,6 +36,7 @@ const Report = struct {
     elevation_gain_m: f64,
     elevation_loss_m: f64,
     climbs: []const gpxz.ClimbStats,
+    descents: []const gpxz.DescentStats,
     waypoints: []const gpxz.Waypoint,
     legs: ?[]const gpxz.LegStats,
     sections: ?[]const gpxz.SectionStats,
@@ -51,6 +52,7 @@ const Report = struct {
             .elevation_gain_m = data.trace.elevation_gain_m,
             .elevation_loss_m = data.trace.elevation_loss_m,
             .climbs = data.trace.climbs,
+            .descents = data.trace.descents,
             .waypoints = data.waypoints,
             .legs = data.legs,
             .sections = data.sections,
@@ -59,6 +61,7 @@ const Report = struct {
         };
         assert(report.distance_m >= 0);
         assert(report.climbs.len <= report.point_count);
+        assert(report.descents.len <= report.point_count);
         return report;
     }
 };
@@ -205,6 +208,20 @@ fn summary_write(writer: *std.Io.Writer, data: *const gpxz.GPXData) std.Io.Write
             climb.elevation_gain_m,
             climb.gradient_percent_average,
             climb.elevation_m_summit,
+        });
+    }
+
+    try writer.print("\ndescents ({d})\n", .{trace.descents.len});
+    for (trace.descents, 1..) |descent, number| {
+        assert(descent.index_start < descent.index_end);
+        const line = "  {d:>3}. km {d:>6.1}  {d:>5.1} km  -{d:>4.0} m  {d:>4.1} %  top {d:.0} m\n";
+        try writer.print(line, .{
+            number,
+            descent.distance_m_start / 1000.0,
+            descent.distance_m / 1000.0,
+            descent.elevation_loss_m,
+            descent.gradient_percent_average,
+            descent.elevation_m_top,
         });
     }
 

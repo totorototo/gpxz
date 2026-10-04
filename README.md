@@ -1,6 +1,6 @@
 # gpxz
 
-A Zig library and CLI for GPX trail routes: parsing, distances, denoised D+/D-, climbs,
+A Zig library and CLI for GPX trail routes: parsing, distances, denoised D+/D-, climbs and descents,
 sections and stages between typed waypoints, and a pace model (Minetti slope cost, fatigue,
 circadian, weather) that estimates durations and cutoff margins.
 
@@ -19,7 +19,7 @@ zig build run -- --pace 420 --fatigue 0.004 --life-base-stop 1800 route.gpx
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--json` | off | Print totals, climbs, waypoints, legs, sections, stages and the plan (per-checkpoint ETAs) as JSON |
+| `--json` | off | Print totals, climbs, descents, waypoints, legs, sections, stages and the plan (per-checkpoint ETAs) as JSON |
 | `--pace <s/km>` | 500 (8:20/km) | Flat-terrain base pace |
 | `--fatigue <k>` | 0.002 | Cumulative fatigue coefficient |
 | `--life-base-stop <s>` | 3600 | Planned stop at each LifeBase |

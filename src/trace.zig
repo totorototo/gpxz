@@ -1,5 +1,6 @@
 //! A trace: the track points of a route, with per-point arrays (cumulative distance, D+ and
-//! D-, slope, pace factor) and the peaks, valleys and climbs of its elevation profile.
+//! D-, slope, pace factor) and the peaks, valleys, climbs and descents of its elevation
+//! profile.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -7,7 +8,9 @@ const testing = std.testing;
 const distance = @import("gps_point.zig").distance;
 const extrema = @import("extrema.zig");
 const climbs_detect = @import("climbs.zig").climbs_detect;
+const descents_detect = @import("climbs.zig").descents_detect;
 pub const ClimbStats = @import("climbs.zig").ClimbStats;
+pub const DescentStats = @import("climbs.zig").DescentStats;
 const douglas_peucker_indices = @import("simplify.zig").douglas_peucker_indices;
 const elevation = @import("elevation.zig");
 const minetti = @import("minetti.zig");
@@ -47,6 +50,7 @@ pub const Trace = struct {
     peaks: []usize,
     valleys: []usize,
     climbs: []ClimbStats,
+    descents: []DescentStats,
     distance_m: f64,
     elevation_gain_m: f64,
     elevation_loss_m: f64,
@@ -97,6 +101,7 @@ pub const Trace = struct {
             .peaks = profile.peaks,
             .valleys = profile.valleys,
             .climbs = profile.climbs,
+            .descents = profile.descents,
             .distance_m = if (points.len > 0) distances_m[points.len - 1] else 0.0,
             .elevation_gain_m = gain_loss.gain_m_total,
             .elevation_loss_m = gain_loss.loss_m_total,
@@ -115,6 +120,7 @@ pub const Trace = struct {
         allocator.free(self.peaks);
         allocator.free(self.valleys);
         allocator.free(self.climbs);
+        allocator.free(self.descents);
         self.* = undefined;
     }
 
@@ -222,9 +228,11 @@ const Profile = struct {
     peaks: []usize,
     valleys: []usize,
     climbs: []ClimbStats,
+    descents: []DescentStats,
 };
 
-/// Returns the peaks, valleys and climbs of the elevation profile. The caller owns them.
+/// Returns the peaks, valleys, climbs and descents of the elevation profile. The caller owns
+/// them.
 fn profile_analyze(
     allocator: std.mem.Allocator,
     points: []const [3]f64,
@@ -240,7 +248,9 @@ fn profile_analyze(
     const valleys = try extrema.find_valleys(allocator, elevations_m);
     errdefer allocator.free(valleys);
     const climbs = try climbs_detect(allocator, peaks, valleys, points, distances_m);
-    return .{ .peaks = peaks, .valleys = valleys, .climbs = climbs };
+    errdefer allocator.free(climbs);
+    const descents = try descents_detect(allocator, peaks, valleys, points, distances_m);
+    return .{ .peaks = peaks, .valleys = valleys, .climbs = climbs, .descents = descents };
 }
 
 /// Four points about 111 m apart due east along the equator.

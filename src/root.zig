@@ -26,6 +26,7 @@ pub const Waypoint = gpx_data.Waypoint;
 pub const Metadata = gpx_data.Metadata;
 pub const Trace = trace.Trace;
 pub const ClimbStats = climbs.ClimbStats;
+pub const DescentStats = climbs.DescentStats;
 pub const LegStats = leg.LegStats;
 pub const SectionStats = section.SectionStats;
 pub const StageStats = stage.StageStats;
