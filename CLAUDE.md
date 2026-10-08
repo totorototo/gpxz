@@ -34,9 +34,11 @@ linked yet.
   through Zigar in terminus, so renaming a public field changes both outputs.
 - **Error policy**: an error is for invalid external bytes (a malformed GPX). An `assert` is
   for library invariants, so a failed assert means a bug in gpxz, never a bad file.
-- **Targets Zig 0.16.0**: I/O needs an explicit `std.Io`, `main` takes `std.process.Init`,
+- **Targets Zig 0.17.0**: I/O needs an explicit `std.Io`, `main` takes `std.process.Init`,
   and containers are unmanaged (`.empty` + pass the allocator on each call).
-  Don't write pre-0.16 idioms.
+  0.17: no `**` (use `@splat`), `@Int` replaces `std.meta.Int`, `@backingInt` /
+  `@fromBackingInt` replace `@intFromEnum` / `@enumFromInt`, struct `@typeInfo` is
+  `field_names`/`field_types`/`field_attrs`. Don't write pre-0.17 idioms.
 
 ## Coding style: TigerBeetle (TIGER_STYLE)
 

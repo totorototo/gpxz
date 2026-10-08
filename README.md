@@ -7,7 +7,7 @@ circadian, weather) that estimates durations and cutoff margins.
 The code was extracted from [terminus](https://github.com/totorototo/terminus), where it runs as WebAssembly in
 the browser. The library is pure: it works on in-memory bytes and does no I/O.
 
-Requires Zig 0.16.0.
+Requires Zig 0.17.0.
 
 ## CLI
 

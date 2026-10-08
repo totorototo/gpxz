@@ -226,7 +226,7 @@ test "ampd_candidates: scales wider than the signal are skipped" {
 test "ampd_candidates: the vector path and the scalar remainder agree" {
     // 20 points: indices 1 to 16 go through the vector path at scale 1, 17 and 18 through
     // the scalar one. A peak on each side of the boundary must be found.
-    var signal = [_]f32{0} ** 20;
+    var signal: [20]f32 = @splat(0);
     signal[5] = 10;
     signal[18] = 10;
     const peaks = try ampd_clustered(&signal, 1, 1, .peak);

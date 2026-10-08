@@ -81,21 +81,14 @@ const CommonIntervalStats = struct {
 /// Returns a struct with `Ids`' fields followed by `CommonIntervalStats`'. SectionStats and
 /// StageStats are both built from the one field list, so they can't drift apart.
 fn WithIds(comptime Ids: type) type {
-    const fields = @typeInfo(Ids).@"struct".fields ++
-        @typeInfo(CommonIntervalStats).@"struct".fields;
-    comptime var names: [fields.len][:0]const u8 = undefined;
-    comptime var types: [fields.len]type = undefined;
-    comptime var attributes: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
-    inline for (fields, 0..) |field, index| {
-        names[index] = field.name;
-        types[index] = field.type;
-        attributes[index] = .{
-            .@"comptime" = field.is_comptime,
-            .@"align" = field.alignment,
-            .default_value_ptr = field.default_value_ptr,
-        };
-    }
-    return @Struct(.auto, null, &names, &types, &attributes);
+    const ids = @typeInfo(Ids).@"struct";
+    const common = @typeInfo(CommonIntervalStats).@"struct";
+    const names = ids.field_names ++ common.field_names;
+    const types = ids.field_types[0..ids.field_types.len].* ++
+        common.field_types[0..common.field_types.len].*;
+    const attributes = ids.field_attrs[0..ids.field_attrs.len].* ++
+        common.field_attrs[0..common.field_attrs.len].*;
+    return @Struct(.auto, null, names, &types, &attributes);
 }
 
 /// Between two consecutive section boundaries. `stage_index` is the stage it belongs to.
@@ -146,8 +139,8 @@ pub fn intervals_compute(
     assert(stats.len == ranges.len);
     for (ranges, stats) |*range, *entry| {
         const common = interval_stats(trace, range, model, settings, &progress);
-        inline for (@typeInfo(CommonIntervalStats).@"struct".fields) |field| {
-            @field(entry, field.name) = @field(common, field.name);
+        inline for (@typeInfo(CommonIntervalStats).@"struct".field_names) |name| {
+            @field(entry, name) = @field(common, name);
         }
         switch (kind) {
             .section => {

@@ -180,7 +180,7 @@ test "douglas_peucker_indices: 0, 1 and 2 points come back unchanged" {
 }
 
 test "douglas_peucker_indices: identical points reduce to the endpoints" {
-    const points = [_][3]f64{.{ 45.0, -122.0, 100.0 }} ** 5;
+    const points: [5][3]f64 = @splat(.{ 45.0, -122.0, 100.0 });
     const indices = try douglas_peucker_indices(testing.allocator, &points, 0.0);
     defer testing.allocator.free(indices);
     try testing.expectEqualSlices(usize, &.{ 0, 4 }, indices);
