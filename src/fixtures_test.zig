@@ -195,3 +195,59 @@ test "grp-160-2026.gpx: the largest file, two LifeBases, three stages" {
         .elevation_last_m = 792,
     });
 }
+
+/// Reads the waypoints of `bytes`, writes them back and reads again: the same route and the
+/// same plan, and nothing but the waypoints touched.
+fn round_trip_check(bytes: []const u8) !void {
+    assert(bytes.len > 0);
+    var before = try gpxz.parse(testing.allocator, bytes, &.{});
+    defer before.deinit(testing.allocator);
+
+    const written = try gpxz.waypoints_replace(testing.allocator, bytes, before.waypoints);
+    defer testing.allocator.free(written);
+    var after = try gpxz.parse(testing.allocator, written, &.{});
+    defer after.deinit(testing.allocator);
+
+    // The track is the same bytes' worth of points, and the waypoints are the same.
+    try testing.expectEqualSlices(f64, before.points_full_resolution, after.points_full_resolution);
+    try testing.expectEqual(before.waypoints.len, after.waypoints.len);
+    for (before.waypoints, after.waypoints) |expected, actual| {
+        try testing.expectEqualStrings(expected.name, actual.name);
+        try testing.expectEqual(expected.latitude, actual.latitude);
+        try testing.expectEqual(expected.longitude, actual.longitude);
+        try testing.expectEqual(expected.elevation_m, actual.elevation_m);
+        try testing.expectEqual(expected.epoch_s, actual.epoch_s);
+        try testing.expectEqualDeep(expected.type_name, actual.type_name);
+    }
+
+    // So the plan gpxz derives is the same, to the last bit.
+    try testing.expectEqual(before.trace.distance_m, after.trace.distance_m);
+    try testing.expectEqual(before.plan.?.len, after.plan.?.len);
+    for (before.plan.?, after.plan.?) |expected, actual| {
+        try testing.expectEqual(expected.distance_m, actual.distance_m);
+        try testing.expectEqual(expected.duration_s_arrival, actual.duration_s_arrival);
+        try testing.expectEqual(expected.epoch_s_cutoff, actual.epoch_s_cutoff);
+    }
+
+    // Everything but the waypoints is the original's: with the waypoints taken out of both,
+    // the files are the same.
+    const bare_before = try gpxz.waypoints_replace(testing.allocator, bytes, &.{});
+    defer testing.allocator.free(bare_before);
+    const bare_after = try gpxz.waypoints_replace(testing.allocator, written, &.{});
+    defer testing.allocator.free(bare_after);
+    try testing.expectEqualStrings(bare_before, bare_after);
+}
+
+test "every fixture: its waypoints written back leave the route and the plan as they were" {
+    inline for (.{
+        "grp-40-gela-2026.gpx",
+        "grp-40-neouvielle-2026.gpx",
+        "grp-50-2026.gpx",
+        "grp-60-2026.gpx",
+        "grp-80-2026.gpx",
+        "grp-120-2026.gpx",
+        "grp-160-2026.gpx",
+    }) |name| {
+        try round_trip_check(@embedFile(name));
+    }
+}

@@ -14,6 +14,11 @@ linked yet.
   summary; `--json` prints totals, climbs, descents, waypoints, legs, sections, stages and the plan, without the
   per-point arrays.
 - The library is pure and does no I/O: bytes and slices in, owned structs out.
+  - `gpx_write.zig`: `waypoints_replace(allocator, bytes, waypoints)` rewrites a file's
+    `<wpt>` elements and nothing else, byte for byte; `waypoint_write` writes one. The
+    waypoints must be in route order (gpxz matches them to the track in file order).
+  - `xml_text.zig`: entities, numeric references and CDATA read as text, and text escaped
+    for writing. Names and descriptions are decoded when read, so a write never escapes twice.
   - `gpx.zig`: GPX parsing by manual `std.mem` scanning (no XML library). `parse(allocator,
     bytes, &settings)` → `GPXData { trace, waypoints, legs, sections, stages, metadata,
     points_full_resolution }` is the main entry point. A malformed element is a
@@ -25,7 +30,7 @@ linked yet.
     `gps_point.zig`'s `latitude_index`, `longitude_index`, `elevation_index`.
   - `gps_point.zig` (Haversine, bearing), `elevation.zig` (denoised D+/D-), `extrema.zig`
     (AMPD peaks and valleys), `climbs.zig` (Garmin-style qualification; descents as the mirrored profile's climbs), `simplify.zig`
-    (Douglas-Peucker), `time.zig` (ISO 8601 → epoch).
+    (Douglas-Peucker), `time.zig` (ISO 8601 ↔ epoch).
   - `leg.zig`, `section.zig`, `stage.zig`: stats between waypoints; sections and stages are
     thin wrappers over `calibration.zig` (a-priori interval stats and live recalibration).
   - `minetti.zig` (slope cost), `pace_model.zig` (slope × fatigue × circadian × weather),

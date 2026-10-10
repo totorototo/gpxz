@@ -14,6 +14,7 @@ const leg = @import("leg.zig");
 const section = @import("section.zig");
 const stage = @import("stage.zig");
 const time = @import("time.zig");
+const xml_text = @import("xml_text.zig");
 const pace_model = @import("pace_model.zig");
 const calibration = @import("calibration.zig");
 
@@ -137,7 +138,7 @@ fn waypoint_parse(
     var waypoint: Waypoint = .{
         .latitude = coordinates[0],
         .longitude = coordinates[1],
-        .name = try allocator.dupe(u8, try child_text(content, "name") orelse ""),
+        .name = try xml_text.unescape_alloc(allocator, try child_text(content, "name") orelse ""),
         .epoch_s = null,
     };
     errdefer waypoint.deinit(allocator);
@@ -178,7 +179,9 @@ pub fn metadata_read(
     return metadata;
 }
 
-const Element = struct {
+pub const Element = struct {
+    /// The index of the `<` that opens the element.
+    start: usize,
     /// Between the element name and the end of the opening tag.
     attributes: []const u8,
     /// Between the opening and closing tags; empty for a self-closing element.
@@ -187,27 +190,36 @@ const Element = struct {
     end: usize,
 };
 
+/// Returns the index of the first `<name` at or after `position` that opens an element of
+/// that name, or null: `<trkpt` must not match `<trkptx`, so the name has to end at
+/// whitespace, `>` or `/`.
+pub fn tag_open_find(bytes: []const u8, position: usize, comptime name: []const u8) ?usize {
+    const open = "<" ++ name;
+    var search = position;
+    // Bounded: each iteration moves `search` forward.
+    while (std.mem.indexOfPos(u8, bytes, search, open)) |found| {
+        const after = found + open.len;
+        if (after < bytes.len and name_ends(bytes[after])) return found;
+        search = after;
+    }
+    return null;
+}
+
 /// Returns the first `<name ...>` element at or after `position`, or null when there is none.
-fn element_next(
+pub fn element_next(
     bytes: []const u8,
     position: usize,
     comptime name: []const u8,
 ) ParseError!?Element {
     const open = "<" ++ name;
-    var search = position;
-    // Bounded: each iteration moves `search` forward.
-    const start = while (std.mem.indexOfPos(u8, bytes, search, open)) |found| {
-        const after = found + open.len;
-        // `<trkpt` must not match `<trkptx`: the name ends at whitespace, `>` or `/`.
-        if (after < bytes.len and name_ends(bytes[after])) break found;
-        search = after;
-    } else return null;
+    const start = tag_open_find(bytes, position, name) orelse return null;
     const attributes_start = start + open.len;
     const tag_end = std.mem.indexOfScalarPos(u8, bytes, attributes_start, '>') orelse
         return error.ElementUnclosed;
     assert(tag_end >= attributes_start);
     if (bytes[tag_end - 1] == '/') {
         return .{
+            .start = start,
             .attributes = bytes[attributes_start .. tag_end - 1],
             .content = "",
             .end = tag_end + 1,
@@ -217,11 +229,12 @@ fn element_next(
     const close_start = std.mem.indexOfPos(u8, bytes, tag_end + 1, close) orelse
         return error.ElementUnclosed;
     const element: Element = .{
+        .start = start,
         .attributes = bytes[attributes_start..tag_end],
         .content = bytes[tag_end + 1 .. close_start],
         .end = close_start + close.len,
     };
-    assert(element.end > position);
+    assert(element.end > position and element.end > element.start);
     return element;
 }
 
@@ -241,14 +254,15 @@ fn child_text(content: []const u8, comptime name: []const u8) ParseError!?[]cons
     return content[text_start..text_end];
 }
 
-/// Returns an owned copy of the first `<name>` child's text, or null when there is none.
+/// Returns an owned copy of the first `<name>` child's text, with its entities decoded (see
+/// `xml_text`), or null when there is none.
 fn child_dupe(
     allocator: std.mem.Allocator,
     content: []const u8,
     comptime name: []const u8,
 ) (ParseError || std.mem.Allocator.Error)!?[]const u8 {
     const text = try child_text(content, name) orelse return null;
-    return try allocator.dupe(u8, text);
+    return try xml_text.unescape_alloc(allocator, text);
 }
 
 /// Returns the value of attribute `name`, quoted with `"` or `'`, or null when absent.
@@ -282,7 +296,7 @@ fn coordinates_parse(attributes: []const u8) ParseError![2]f64 {
     return .{ latitude, longitude };
 }
 
-fn coordinates_valid(latitude: f64, longitude: f64) bool {
+pub fn coordinates_valid(latitude: f64, longitude: f64) bool {
     return latitude >= -90.0 and latitude <= 90.0 and longitude >= -180.0 and longitude <= 180.0;
 }
 
@@ -598,6 +612,46 @@ test "waypoints_read: an error partway frees what was already read" {
     ;
     // testing.allocator fails the test on a leak.
     try testing.expectError(error.TimeInvalid, waypoints_read(testing.allocator, bytes));
+}
+
+test "waypoints_read: entities and CDATA in the text are decoded" {
+    const bytes =
+        \\<wpt lat="1" lon="2"><name>Col d&apos;Aubisque &amp; Soulor</name>
+        \\<desc><![CDATA[Soup <hot> & bread]]></desc><cmt>caf&#233; &#x4E2D;</cmt>
+        \\<type>Time&#66;arrier</type></wpt>
+    ;
+    const waypoints = try waypoints_read(testing.allocator, bytes);
+    defer waypoints_free(testing.allocator, waypoints);
+    try testing.expectEqualStrings("Col d'Aubisque & Soulor", waypoints[0].name);
+    try testing.expectEqualStrings("Soup <hot> & bread", waypoints[0].description.?);
+    try testing.expectEqualStrings("café 中", waypoints[0].comment.?);
+    try testing.expectEqualStrings("TimeBarrier", waypoints[0].type_name.?);
+}
+
+test "metadata_read: the name and description are decoded" {
+    const bytes = "<metadata><name>Trail &amp; Co</name><desc>a &lt; b</desc></metadata>";
+    var metadata = try metadata_read(testing.allocator, bytes);
+    defer metadata.deinit(testing.allocator);
+    try testing.expectEqualStrings("Trail & Co", metadata.name.?);
+    try testing.expectEqualStrings("a < b", metadata.description.?);
+}
+
+test "tag_open_find: the name must end where a tag name ends" {
+    const bytes = "<wptx/><wpt lat=\"1\" lon=\"2\"/>";
+    try testing.expectEqual(@as(?usize, 7), tag_open_find(bytes, 0, "wpt"));
+    try testing.expectEqual(@as(?usize, null), tag_open_find(bytes, 8, "wpt"));
+    try testing.expectEqual(@as(?usize, null), tag_open_find("", 0, "wpt"));
+    try testing.expectEqual(@as(?usize, null), tag_open_find("<wpt", 0, "wpt"));
+}
+
+test "element_next: reports where the element starts" {
+    const bytes = "  <wpt lat=\"1\" lon=\"2\"><name>x</name></wpt> <wpt/>";
+    const first = (try element_next(bytes, 0, "wpt")).?;
+    try testing.expectEqual(@as(usize, 2), first.start);
+    try testing.expectEqualStrings("<name>x</name>", first.content);
+    const second = (try element_next(bytes, first.end, "wpt")).?;
+    try testing.expectEqual(bytes.len - 6, second.start);
+    try testing.expectEqual(bytes.len, second.end);
 }
 
 test "metadata_read: from <metadata>, from the root, or none" {

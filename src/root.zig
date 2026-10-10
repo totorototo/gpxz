@@ -5,6 +5,8 @@ const std = @import("std");
 
 pub const gpx = @import("gpx.zig");
 pub const gpx_data = @import("gpx_data.zig");
+pub const gpx_write = @import("gpx_write.zig");
+pub const xml_text = @import("xml_text.zig");
 pub const trace = @import("trace.zig");
 pub const gps_point = @import("gps_point.zig");
 pub const time = @import("time.zig");
@@ -34,6 +36,7 @@ pub const WeatherLookup = pace_model.WeatherLookup;
 pub const Settings = pace_model.Settings;
 pub const ParseError = gpx.ParseError;
 pub const parse = gpx.parse;
+pub const waypoints_replace = gpx_write.waypoints_replace;
 
 test {
     std.testing.refAllDecls(@This());

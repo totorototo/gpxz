@@ -51,6 +51,27 @@ defer data.deinit(allocator);
 std.debug.print("{d:.1} km\n", .{data.trace.distance_m / 1000.0});
 ```
 
+## Writing
+
+gpxz also writes: `waypoints_replace` returns a GPX file with its `<wpt>` elements replaced and
+everything else (the track, the metadata, any extension gpxz doesn't read) untouched, byte for
+byte. The new waypoints go after `<metadata>` and before the routes and tracks, as GPX 1.1
+puts them, in the file's own line endings.
+
+```zig
+const edited = try gpxz.waypoints_replace(allocator, bytes, waypoints);
+defer allocator.free(edited);
+```
+
+They are written as the director's files have them (`<ele>`, `<name>`, `<type>`, `<time>`),
+plus `<desc>`, `<cmt>` and `<sym>` when set, and `<stopDuration>` (seconds), which gpxz reads
+as the planned stop and other tools ignore. Text is escaped, and read back unescaped.
+
+Write the waypoints in route order: gpxz matches each one to the track after the previous one,
+so the order of the file is part of what it says. A waypoint that can't be written
+(`CoordinateInvalid`, `NumberInvalid`, `TimeOutOfRange`) is an error before anything is built,
+and a file that isn't GPX is `NotGpx`.
+
 ## Tests
 
 ```sh

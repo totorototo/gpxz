@@ -42,7 +42,7 @@ pub const Waypoint = struct {
     /// `<type>`: "Start", "TimeBarrier", "LifeBase", "Arrival", anything else, or absent.
     type_name: ?[]const u8 = null,
     /// `<time>`: the cutoff at this checkpoint.
-    epoch_s: ?i64,
+    epoch_s: ?i64 = null,
     /// `<stopDuration>`: the planned stop here.
     stop_s: ?u32 = null,
 
