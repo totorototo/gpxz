@@ -29,7 +29,7 @@ linked yet.
   - `leg.zig`, `section.zig`, `stage.zig`: stats between waypoints; sections and stages are
     thin wrappers over `calibration.zig` (a-priori interval stats and live recalibration).
   - `minetti.zig` (slope cost), `pace_model.zig` (slope × fatigue × circadian × weather),
-    `segment.zig` (per-point metrics), `soundscape.zig` (audio frames, terminus-specific).
+    `segment.zig` (per-point metrics).
 - **Names are JSON keys**: struct fields serialize as-is in `--json` and reach JavaScript
   through Zigar in terminus, so renaming a public field changes both outputs.
 - **Error policy**: an error is for invalid external bytes (a malformed GPX). An `assert` is
