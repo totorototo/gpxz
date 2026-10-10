@@ -201,9 +201,33 @@ fn line_span(bytes: []const u8, start: usize, end: usize, floor: usize) Span {
     else
         0;
     if (at_line_start and (newline_length > 0 or span_end == bytes.len)) {
-        return .{ .start = span_start, .end = span_end + newline_length };
+        const line_end = span_end + newline_length;
+        return .{ .start = span_start, .end = blank_lines_skip(bytes, line_end) };
     }
     return .{ .start = start, .end = end };
+}
+
+/// Returns `position` moved past the blank lines (only spaces and tabs) that follow, so
+/// the gaps a file keeps between its waypoints go with them instead of piling up where the
+/// new ones are written.
+fn blank_lines_skip(bytes: []const u8, position: usize) usize {
+    var line_start = position;
+    // Bounded: each pass moves past one line or stops.
+    while (line_start < bytes.len) {
+        var cursor = line_start;
+        while (cursor < bytes.len and (bytes[cursor] == ' ' or bytes[cursor] == '\t')) {
+            cursor += 1;
+        }
+        if (std.mem.startsWith(u8, bytes[cursor..], "\r\n")) {
+            line_start = cursor + 2;
+        } else if (cursor < bytes.len and bytes[cursor] == '\n') {
+            line_start = cursor + 1;
+        } else {
+            break;
+        }
+    }
+    assert(line_start >= position and line_start <= bytes.len);
+    return line_start;
 }
 
 /// Returns where the waypoints go in `bytes` (which has none): at the start of the line of
@@ -240,8 +264,6 @@ fn waypoints_count(bytes: []const u8) usize {
     }
     return count;
 }
-
-// ── Tests ───────────────────────────────────────────────────────────────────────────────
 
 fn at(text: []const u8, needle: []const u8) usize {
     return std.mem.indexOf(u8, text, needle).?;
@@ -554,6 +576,15 @@ test "waypoints_replace: blanks around a waypoint are cut with it, other content
     const out = try waypoints_replace(testing.allocator, text, &.{});
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("<gpx>\n<metadata/>  <b/>\n<trk/></gpx>", out);
+}
+
+test "waypoints_replace: the gaps between removed waypoints go with them" {
+    const text = "<gpx>\n<wpt lat=\"1\" lon=\"1\"/>\n\n  \n<wpt lat=\"2\" lon=\"2\"/>\r\n\r\n" ++
+        "<trk/>\n\n</gpx>";
+    const out = try waypoints_replace(testing.allocator, text, &.{});
+    defer testing.allocator.free(out);
+    // Blank lines after the last waypoint go too; those before the track's content stay.
+    try testing.expectEqualStrings("<gpx>\n<trk/>\n\n</gpx>", out);
 }
 
 test "waypoints_replace: text that is not a GPX file is rejected" {
