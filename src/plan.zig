@@ -3,16 +3,25 @@
 //! runner intends to do there: the pace model's inputs and the arrival and stop at each
 //! checkpoint. A course can have several plans, and each plan names its course by the SHA-256
 //! of the GPX bytes, so a plan made for another file, or for an edited one, is detectable.
+//!
+//! v2 adds fueling (`fueling.zig`): the runner's hourly targets and refill points in
+//! `model.fueling`, and what to leave each checkpoint with in `carry`, one per entry. A v1
+//! file still reads, with no fueling.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const PlanEntry = @import("calibration.zig").PlanEntry;
+const fueling = @import("fueling.zig");
 const pace_model = @import("pace_model.zig");
 
-/// Bumped on any change a v1 reader can't read: a renamed, removed or retyped field.
-pub const schema_version: u32 = 1;
+/// The version gpxz writes. Bumped on any change an older reader can't read: an added,
+/// renamed, removed or retyped field (the reader rejects unknown fields).
+pub const schema_version: u32 = 2;
+/// The oldest version gpxz still reads. v1 is v2 without fueling, so it parses into v2's
+/// types through their defaults.
+pub const schema_version_read_min: u32 = 1;
 
 /// The SHA-256 of a course's GPX bytes, as lowercase hex.
 pub const Sha256Hex = [Sha256.digest_length * 2]u8;
@@ -23,6 +32,9 @@ pub const Plan = struct {
     model: Model,
     /// One per checkpoint, in race order; borrowed from `GPXData.plan`, not owned.
     entries: []const PlanEntry,
+    /// What to leave each entry with: one per entry with `model.fueling`, else empty.
+    /// Kept apart from `entries` so they keep v1's shape and the pace model's types.
+    carry: []const ?fueling.Carry = &.{},
 };
 
 /// Which course the plan is for. `name` and `distance_m` are for a human reading the file;
@@ -33,12 +45,15 @@ pub const Course = struct {
     distance_m: f64,
 };
 
-/// The pace model's inputs that produced the entries. Weather is not part of v1, so a plan
-/// built with a weather lookup is refused rather than written with inputs it can't replay.
+/// The inputs that produced the entries and the carry. Weather is not part of the schema, so
+/// a plan built with a weather lookup is refused rather than written with inputs it can't
+/// replay.
 pub const Model = struct {
     pace_base_s_per_km: f64,
     fatigue_coefficient: f64,
     life_base_stop_s: u32,
+    /// Null when the runner plans no fueling, and always in a v1 file.
+    fueling: ?fueling.Fueling = null,
 };
 
 pub fn course_sha256(bytes: []const u8) Sha256Hex {
@@ -50,18 +65,22 @@ pub fn course_sha256(bytes: []const u8) Sha256Hex {
 }
 
 /// Returns the plan for the course in `bytes`, from the entries `parse` computed on those same
-/// bytes with `settings`. Borrows `name` and `entries`, so they must outlive the plan.
+/// bytes with `settings`, and the fueling `carry_compute` computed on those entries, if any.
+/// Borrows `name`, `entries` and the fueling's slices, so they must outlive the plan.
 pub fn plan_build(
     bytes: []const u8,
     name: ?[]const u8,
     distance_m: f64,
     entries: []const PlanEntry,
     settings: *const pace_model.Settings,
+    fuel_plan: ?*const fueling.FuelPlan,
 ) Plan {
     settings.assert_valid();
-    // v1 has no weather field: writing a plan whose times depend on one would lose an input.
+    // The schema has no weather field: writing a plan whose times depend on one would lose an
+    // input.
     assert(settings.weather.names.len == 0);
     assert(distance_m >= 0 and std.math.isFinite(distance_m));
+    if (fuel_plan) |fuel| assert(fuel.carry.len == entries.len);
     const plan: Plan = .{
         .schema_version = schema_version,
         .course = .{ .name = name, .sha256 = course_sha256(bytes), .distance_m = distance_m },
@@ -69,8 +88,10 @@ pub fn plan_build(
             .pace_base_s_per_km = settings.pace_base_s_per_km,
             .fatigue_coefficient = settings.fatigue_coefficient,
             .life_base_stop_s = settings.life_base_stop_s,
+            .fueling = if (fuel_plan) |fuel| fuel.fueling else null,
         },
         .entries = entries,
+        .carry = if (fuel_plan) |fuel| fuel.carry else &.{},
     };
     assert(plan.entries.len == entries.len);
     // Paired with `plan_read`: a plan gpxz writes is always one it reads back.
@@ -82,7 +103,8 @@ pub fn plan_build(
 /// asserts it and the reader returns `error.PlanInvalid` without it, so the two agree on what a
 /// valid plan is.
 pub fn plan_valid(plan: *const Plan) bool {
-    if (plan.schema_version != schema_version) return false;
+    if (plan.schema_version < schema_version_read_min) return false;
+    if (plan.schema_version > schema_version) return false;
     if (!sha256_hex_valid(&plan.course.sha256)) return false;
     if (!(plan.course.distance_m >= 0) or !std.math.isFinite(plan.course.distance_m)) return false;
     const model = &plan.model;
@@ -92,7 +114,18 @@ pub fn plan_valid(plan: *const Plan) bool {
     if (!(model.fatigue_coefficient >= 0) or !std.math.isFinite(model.fatigue_coefficient)) {
         return false;
     }
-    return entries_valid(plan.entries, plan.course.distance_m);
+    if (!entries_valid(plan.entries, plan.course.distance_m)) return false;
+    return fuel_valid(plan);
+}
+
+/// Fueling: none in a v1 file; else no carry without fueling, and with it, valid targets and
+/// exactly the carry `carry_compute` gives. After `entries_valid`, which `carry_matches`
+/// relies on to see times that run forward.
+fn fuel_valid(plan: *const Plan) bool {
+    const fuel = plan.model.fueling orelse return plan.carry.len == 0;
+    if (plan.schema_version < 2) return false;
+    if (!fueling.fueling_valid(&fuel, plan.entries.len)) return false;
+    return fueling.carry_matches(plan.entries, &fuel, plan.carry);
 }
 
 /// Lowercase only, as `course_sha256` writes it, so comparing two hashes is a byte compare.
@@ -156,22 +189,24 @@ pub const ReadError = std.json.ParseError(std.json.Scanner) || error{
 /// separate (`course_matches`), since a reader may want to show a plan for a missing course.
 pub fn plan_read(allocator: std.mem.Allocator, bytes: []const u8) ReadError!std.json.Parsed(Plan) {
     if (bytes.len > plan_bytes_max) return error.PlanTooLarge;
-    // The version first, ignoring the rest, so a v2 file is "unsupported" rather than whatever
-    // v1's strict parse would trip on.
+    // The version first, ignoring the rest, so a newer file is "unsupported" rather than
+    // whatever this version's strict parse would trip on.
     const Version = struct { schema_version: u32 };
     const version = try std.json.parseFromSlice(Version, allocator, bytes, .{
         .ignore_unknown_fields = true,
     });
     const version_number = version.value.schema_version;
     version.deinit();
-    if (version_number != schema_version) return error.SchemaVersionUnsupported;
+    if (version_number < schema_version_read_min) return error.SchemaVersionUnsupported;
+    if (version_number > schema_version) return error.SchemaVersionUnsupported;
 
     const parsed = try std.json.parseFromSlice(Plan, allocator, bytes, .{
         .allocate = .alloc_always,
     });
     errdefer parsed.deinit();
     if (!plan_valid(&parsed.value)) return error.PlanInvalid;
-    assert(parsed.value.schema_version == schema_version);
+    assert(parsed.value.schema_version >= schema_version_read_min);
+    assert(parsed.value.schema_version <= schema_version);
     return parsed;
 }
 
@@ -187,6 +222,8 @@ pub fn course_matches(plan: *const Plan, bytes: []const u8) bool {
 /// Writes `plan` as `plan.json`: indented JSON with a trailing newline.
 pub fn plan_write(writer: *std.Io.Writer, plan: *const Plan) std.Io.Writer.Error!void {
     assert(plan_valid(plan));
+    // gpxz writes the current version only: a plan read from an older file is rebuilt first.
+    assert(plan.schema_version == schema_version);
     const options: std.json.Stringify.Options = .{ .whitespace = .indent_2 };
     try std.json.Stringify.value(plan.*, options, writer);
     try writer.writeByte('\n');
@@ -230,7 +267,7 @@ test "plan_build: copies the model and hashes the bytes" {
         entry_test("Finish", 60_000, 9 * 3600, 0),
     };
     const settings: pace_model.Settings = .{ .pace_base_s_per_km = 420, .life_base_stop_s = 1800 };
-    const plan = plan_build("<gpx/>", "Loop", 60_000, &entries, &settings);
+    const plan = plan_build("<gpx/>", "Loop", 60_000, &entries, &settings, null);
     try testing.expectEqual(schema_version, plan.schema_version);
     try testing.expectEqualStrings("Loop", plan.course.name.?);
     try testing.expectEqualStrings(&course_sha256("<gpx/>"), &plan.course.sha256);
@@ -241,17 +278,17 @@ test "plan_build: copies the model and hashes the bytes" {
 }
 
 test "plan_build: zero entries and an unnamed course" {
-    const plan = plan_build("", null, 0, &.{}, &.{});
+    const plan = plan_build("", null, 0, &.{}, &.{}, null);
     try testing.expect(plan.course.name == null);
     try testing.expectEqual(@as(usize, 0), plan.entries.len);
 }
 
-test "plan_write: the JSON has every v1 key, and entries keep their order" {
+test "plan_write: the JSON has every v2 key, and entries keep their order" {
     const entries = [_]PlanEntry{
         entry_test("Start", 0, 0, 0),
         entry_test("Finish", 10_000, 3600, 0),
     };
-    const plan = plan_build("<gpx/>", "Loop", 10_000, &entries, &.{});
+    const plan = plan_build("<gpx/>", "Loop", 10_000, &entries, &.{}, null);
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try plan_write(&out.writer, &plan);
@@ -265,13 +302,17 @@ test "plan_write: the JSON has every v1 key, and entries keep their order" {
     const course = root.get("course").?.object;
     try testing.expectEqualStrings("Loop", course.get("name").?.string);
     try testing.expectEqualStrings(&plan.course.sha256, course.get("sha256").?.string);
-    try testing.expect(root.get("model").?.object.get("pace_base_s_per_km") != null);
+    const model = root.get("model").?.object;
+    try testing.expect(model.get("pace_base_s_per_km") != null);
+    // No fueling: the keys stay, as null and [], so a reader never has to guess v2's shape.
+    try testing.expect(model.get("fueling").? == .null);
+    try testing.expectEqual(@as(usize, 0), root.get("carry").?.array.items.len);
     const items = root.get("entries").?.array.items;
     try testing.expectEqual(@as(usize, 2), items.len);
     try testing.expectEqualStrings("Start", items[0].object.get("name").?.string);
     try testing.expectEqualStrings("Finish", items[1].object.get("name").?.string);
-    // Unnamed course: the key stays, as null, so a reader never has to guess v1's shape.
-    const unnamed = plan_build("", null, 0, &.{}, &.{});
+    // Unnamed course: the key stays, as null.
+    const unnamed = plan_build("", null, 0, &.{}, &.{}, null);
     out.clearRetainingCapacity();
     try plan_write(&out.writer, &unnamed);
     try testing.expect(std.mem.indexOf(u8, out.written(), "\"name\": null") != null);
@@ -279,7 +320,7 @@ test "plan_write: the JSON has every v1 key, and entries keep their order" {
 
 test "plan_write: round-trips through std.json into Plan" {
     const entries = [_]PlanEntry{ entry_test("Start", 0, 0, 0), entry_test("End", 5000, 1800, 0) };
-    const plan = plan_build("bytes", "Out and back", 5000, &entries, &.{});
+    const plan = plan_build("bytes", "Out and back", 5000, &entries, &.{}, null);
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try plan_write(&out.writer, &plan);
@@ -293,7 +334,7 @@ test "plan_write: round-trips through std.json into Plan" {
 /// A valid two-entry plan for the reader tests to break one field at a time.
 fn plan_test(entries: *[2]PlanEntry) Plan {
     entries.* = .{ entry_test("Start", 0, 0, 0), entry_test("End", 5000, 1800, 600) };
-    return plan_build("<gpx/>", "Loop", 5000, entries, &.{});
+    return plan_build("<gpx/>", "Loop", 5000, entries, &.{}, null);
 }
 
 /// Serializes without `plan_write`'s assert, so a test can write a plan gpxz never would.
@@ -324,7 +365,7 @@ test "plan_read: reads what plan_write wrote, and owns it" {
 }
 
 test "plan_read: zero entries and a null name are valid" {
-    const plan = plan_build("", null, 0, &.{}, &.{});
+    const plan = plan_build("", null, 0, &.{}, &.{}, null);
     const bytes = try json_test(&plan);
     defer testing.allocator.free(bytes);
     const parsed = try plan_read(testing.allocator, bytes);
@@ -333,11 +374,11 @@ test "plan_read: zero entries and a null name are valid" {
     try testing.expectEqual(@as(usize, 0), parsed.value.entries.len);
 }
 
-test "plan_read: other schema versions, missing version, not JSON, unknown v1 field" {
+test "plan_read: other schema versions, missing version, not JSON, unknown field" {
     const allocator = testing.allocator;
-    // A v2 file with fields v1 doesn't know: unsupported, not a v1 parse error.
-    const v2 = "{\"schema_version\": 2, \"segments\": [], \"course\": 7}";
-    try testing.expectError(error.SchemaVersionUnsupported, plan_read(allocator, v2));
+    // A v3 file with fields v2 doesn't know: unsupported, not a v2 parse error.
+    const v3 = "{\"schema_version\": 3, \"segments\": [], \"course\": 7}";
+    try testing.expectError(error.SchemaVersionUnsupported, plan_read(allocator, v3));
     const v0 = "{\"schema_version\": 0}";
     try testing.expectError(error.SchemaVersionUnsupported, plan_read(allocator, v0));
     try testing.expectError(error.MissingField, plan_read(allocator, "{\"course\": {}}"));
@@ -435,4 +476,130 @@ test "course_matches: the same bytes match, one changed byte does not" {
     try testing.expect(course_matches(&plan, "<gpx/>"));
     try testing.expect(!course_matches(&plan, "<gpx />"));
     try testing.expect(!course_matches(&plan, ""));
+}
+
+/// A valid three-entry plan with fueling: full at the start, nothing at the LifeBase, and the
+/// finish. Fills the caller's arrays, which the plan borrows.
+fn fuel_plan_test(
+    entries: *[3]PlanEntry,
+    supplies: *[3]fueling.Supply,
+    carry: *[3]?fueling.Carry,
+) Plan {
+    entries.* = .{
+        entry_test("Start", 0, 0, 0),
+        entry_test("LB1", 30_000, 4 * 3600, 1800),
+        entry_test("Finish", 60_000, 9 * 3600, 0),
+    };
+    supplies.* = .{ .full, .none, .none };
+    const fuel: fueling.Fueling = .{
+        .carbs_g_per_h = 70,
+        .fluid_ml_per_h = 500,
+        .sodium_mg_per_h = 400,
+        .reserve_s = 1800,
+        .supplies = supplies,
+    };
+    var times: [3]fueling.Times = undefined;
+    fueling.times_from_entries(entries, &times);
+    fueling.carry_compute(&times, &fuel, carry);
+    const fuel_plan: fueling.FuelPlan = .{ .fueling = fuel, .carry = carry };
+    return plan_build("<gpx/>", "Loop", 60_000, entries, &.{}, &fuel_plan);
+}
+
+test "plan_build and plan_read: fueling round-trips, and the reader owns it" {
+    var entries: [3]PlanEntry = undefined;
+    var supplies: [3]fueling.Supply = undefined;
+    var carry: [3]?fueling.Carry = undefined;
+    const plan = fuel_plan_test(&entries, &supplies, &carry);
+    // 9 h to the finish and the 30 min reserve: 9.5 h at 70 g/h is 665 g.
+    try testing.expectEqual(@as(f64, 665), plan.carry[0].?.carbs_g.?);
+    try testing.expectEqual(@as(f64, 4750), plan.carry[0].?.fluid_ml);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try plan_write(&out.writer, &plan);
+    const bytes = try testing.allocator.dupe(u8, out.written());
+    const parsed = try plan_read(testing.allocator, bytes);
+    defer parsed.deinit();
+    @memset(bytes, 0);
+    testing.allocator.free(bytes);
+
+    const fuel = parsed.value.model.fueling.?;
+    try testing.expectEqual(@as(f64, 70), fuel.carbs_g_per_h);
+    try testing.expectEqual(@as(u32, 1800), fuel.reserve_s);
+    try testing.expectEqualSlices(fueling.Supply, &supplies, fuel.supplies);
+    try testing.expectEqual(@as(usize, 3), parsed.value.carry.len);
+    try testing.expectEqual(carry[0].?.sodium_mg, parsed.value.carry[0].?.sodium_mg);
+    try testing.expect(parsed.value.carry[1] == null and parsed.value.carry[2] == null);
+}
+
+test "plan_read: a v1 file reads with no fueling, and a v1 file with fueling is invalid" {
+    const allocator = testing.allocator;
+    var entries: [2]PlanEntry = undefined;
+    const plan = plan_test(&entries);
+    const v2 = try json_test(&plan);
+    defer allocator.free(v2);
+    // v1's exact shape: no fueling key, no carry key.
+    const no_fueling = try std.mem.replaceOwned(u8, allocator, v2, ",\"fueling\":null", "");
+    defer allocator.free(no_fueling);
+    const no_carry = try std.mem.replaceOwned(u8, allocator, no_fueling, ",\"carry\":[]", "");
+    defer allocator.free(no_carry);
+    const v1 = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        no_carry,
+        "\"schema_version\":2",
+        "\"schema_version\":1",
+    );
+    defer allocator.free(v1);
+    try testing.expect(std.mem.indexOf(u8, v1, "fueling") == null);
+    try testing.expect(std.mem.indexOf(u8, v1, "carry") == null);
+
+    const parsed = try plan_read(allocator, v1);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(u32, 1), parsed.value.schema_version);
+    try testing.expect(parsed.value.model.fueling == null);
+    try testing.expectEqual(@as(usize, 0), parsed.value.carry.len);
+
+    var fuel_entries: [3]PlanEntry = undefined;
+    var supplies: [3]fueling.Supply = undefined;
+    var carry: [3]?fueling.Carry = undefined;
+    var fueled = fuel_plan_test(&fuel_entries, &supplies, &carry);
+    fueled.schema_version = 1;
+    try testing.expect(!plan_valid(&fueled));
+    const bytes = try json_test(&fueled);
+    defer allocator.free(bytes);
+    try testing.expectError(error.PlanInvalid, plan_read(allocator, bytes));
+}
+
+test "plan_read: each broken fueling invariant is PlanInvalid" {
+    const Break = enum {
+        supplies_short,
+        carry_short,
+        carry_off_by_one,
+        carry_where_none,
+        carry_without_fueling,
+        rate_negative,
+        reserve_changed,
+    };
+    for (std.enums.values(Break)) |which| {
+        var entries: [3]PlanEntry = undefined;
+        var supplies: [3]fueling.Supply = undefined;
+        var carry: [3]?fueling.Carry = undefined;
+        var plan = fuel_plan_test(&entries, &supplies, &carry);
+        try testing.expect(plan_valid(&plan));
+        switch (which) {
+            .supplies_short => plan.model.fueling.?.supplies = supplies[0..2],
+            .carry_short => plan.carry = carry[0..2],
+            .carry_off_by_one => carry[0].?.carbs_g.? += 1,
+            .carry_where_none => carry[1] = .{ .fluid_ml = 0, .carbs_g = 0, .sodium_mg = 0 },
+            .carry_without_fueling => plan.model.fueling = null,
+            .rate_negative => plan.model.fueling.?.carbs_g_per_h = -1,
+            // The carry no longer matches its inputs: the editor must recompute it.
+            .reserve_changed => plan.model.fueling.?.reserve_s += 60,
+        }
+        try testing.expect(!plan_valid(&plan));
+        const bytes = try json_test(&plan);
+        defer testing.allocator.free(bytes);
+        try testing.expectError(error.PlanInvalid, plan_read(testing.allocator, bytes));
+    }
 }
