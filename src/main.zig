@@ -10,9 +10,12 @@ const file_size_max = 64 * 1024 * 1024;
 const arguments_max = 16;
 
 const usage =
-    \\usage: gpxz [--json] [--pace <s/km>] [--fatigue <k>] [--life-base-stop <s>] <file.gpx>
+    \\usage: gpxz [--json | --plan] [--pace <s/km>] [--fatigue <k>] [--life-base-stop <s>]
+    \\            <file.gpx>
     \\  --json             print the route (totals, climbs, descents, waypoints, legs, sections,
     \\                     stages, plan) as JSON on stdout instead of the text summary
+    \\  --plan             print the plan as plan.json on stdout: the model's inputs, the
+    \\                     course's SHA-256, and the arrival and stop at each checkpoint
     \\  --pace             flat-terrain base pace in seconds per km (default 500 = 8:20/km)
     \\  --fatigue          cumulative fatigue coefficient (default 0.002)
     \\  --life-base-stop   planned stop at each LifeBase in seconds (default 3600)
@@ -20,8 +23,12 @@ const usage =
     \\
 ;
 
+/// What the CLI prints. One mode, not a flag each, so `--json --plan` is a usage error rather
+/// than a precedence rule.
+const Output = enum { summary, json, plan };
+
 const Options = struct {
-    json: bool = false,
+    output: Output = .summary,
     settings: gpxz.Settings = .{},
     path: []const u8,
 };
@@ -103,7 +110,15 @@ pub fn main(init: std.process.Init) !void {
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
-    output_write(&stdout_writer.interface, &data, options.json) catch |err| {
+    if (options.output == .plan and data.plan == null) {
+        // Fewer than two typed checkpoints is a property of the file, not a bug.
+        std.debug.print("gpxz: {s}: no plan, the route has fewer than 2 checkpoints\n", .{
+            options.path,
+        });
+        std.process.exit(1);
+    }
+    const input: Input = .{ .bytes = bytes, .data = &data, .settings = &options.settings };
+    output_write(&stdout_writer.interface, &input, options.output) catch |err| {
         // The reader closed the pipe early (`gpxz --json r.gpx | head`): that is how the
         // output was meant to be used, not a failure.
         if (stdout_writer.err) |write_err| {
@@ -113,13 +128,34 @@ pub fn main(init: std.process.Init) !void {
     };
 }
 
-fn output_write(writer: *std.Io.Writer, data: *const gpxz.GPXData, json: bool) !void {
-    if (json) {
-        const options: std.json.Stringify.Options = .{ .whitespace = .indent_2 };
-        try std.json.Stringify.value(Report.from_data(data), options, writer);
-        try writer.writeByte('\n');
-    } else {
-        try summary_write(writer, data);
+/// Everything an output mode may need: `--plan` hashes the file's bytes and records the
+/// settings, the other modes read only the parsed data.
+const Input = struct {
+    bytes: []const u8,
+    data: *const gpxz.GPXData,
+    settings: *const gpxz.Settings,
+};
+
+fn output_write(writer: *std.Io.Writer, input: *const Input, output: Output) !void {
+    switch (output) {
+        .summary => try summary_write(writer, input.data),
+        .json => {
+            const options: std.json.Stringify.Options = .{ .whitespace = .indent_2 };
+            try std.json.Stringify.value(Report.from_data(input.data), options, writer);
+            try writer.writeByte('\n');
+        },
+        .plan => {
+            // main checks this before writing, since a missing plan is the file's fault.
+            const entries = input.data.plan orelse unreachable;
+            const plan = gpxz.plan_build(
+                input.bytes,
+                input.data.metadata.name,
+                input.data.trace.distance_m,
+                entries,
+                input.settings,
+            );
+            try gpxz.plan_write(writer, &plan);
+        },
     }
     try writer.flush();
 }
@@ -136,8 +172,16 @@ fn options_parse(arguments: []const [:0]const u8) ?Options {
     var index: usize = 1;
     while (index < arguments.len) : (index += 1) {
         const argument = arguments[index];
-        if (std.mem.eql(u8, argument, "--json")) {
-            options.json = true;
+        const output: ?Output = if (std.mem.eql(u8, argument, "--json"))
+            .json
+        else if (std.mem.eql(u8, argument, "--plan"))
+            .plan
+        else
+            null;
+        if (output) |mode| {
+            // Repeating the same mode is harmless; asking for two is ambiguous.
+            if (options.output != .summary and options.output != mode) return null;
+            options.output = mode;
         } else if (std.mem.startsWith(u8, argument, "--")) {
             index += 1;
             if (index >= arguments.len) return null;
@@ -300,7 +344,7 @@ fn duration_write(writer: *std.Io.Writer, seconds: f64) std.Io.Writer.Error!void
 test "options_parse: path only uses defaults" {
     const options = options_parse(&.{ "gpxz", "route.gpx" }).?;
     try std.testing.expectEqualStrings("route.gpx", options.path);
-    try std.testing.expect(!options.json);
+    try std.testing.expectEqual(Output.summary, options.output);
     try std.testing.expectEqual(@as(u32, 3600), options.settings.life_base_stop_s);
 }
 
@@ -308,7 +352,7 @@ test "options_parse: flags with values" {
     const options = options_parse(&.{
         "gpxz", "--json", "--pace", "420", "--fatigue", "0.004", "--life-base-stop", "0", "r.gpx",
     }).?;
-    try std.testing.expect(options.json);
+    try std.testing.expectEqual(Output.json, options.output);
     try std.testing.expectApproxEqAbs(@as(f64, 420), options.settings.pace_base_s_per_km, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 0.004), options.settings.fatigue_coefficient, 1e-9);
     try std.testing.expectEqual(@as(u32, 0), options.settings.life_base_stop_s);
@@ -323,6 +367,15 @@ test "options_parse: usage errors return null" {
     try std.testing.expect(options_parse(&.{ "gpxz", "--life-base-stop", "-1", "a.gpx" }) == null);
     try std.testing.expect(options_parse(&.{ "gpxz", "--nope", "x", "a.gpx" }) == null);
     try std.testing.expect(options_parse(&.{ "gpxz", "" }) == null);
+}
+
+test "options_parse: --plan, and one output mode at most" {
+    const once = options_parse(&.{ "gpxz", "--plan", "a.gpx" }).?;
+    try std.testing.expectEqual(Output.plan, once.output);
+    const twice = options_parse(&.{ "gpxz", "--plan", "--plan", "a.gpx" }).?;
+    try std.testing.expectEqual(Output.plan, twice.output);
+    try std.testing.expect(options_parse(&.{ "gpxz", "--json", "--plan", "a.gpx" }) == null);
+    try std.testing.expect(options_parse(&.{ "gpxz", "--plan", "--json", "a.gpx" }) == null);
 }
 
 test "options_parse: non-finite values return null" {
@@ -410,4 +463,38 @@ test "summary_write and JSON report on a small route" {
     defer parsed.deinit();
     try std.testing.expectEqualStrings("Test loop", parsed.value.object.get("name").?.string);
     try std.testing.expectEqual(@as(i64, 3), parsed.value.object.get("point_count").?.integer);
+}
+
+const test_gpx_checkpoints =
+    \\<?xml version="1.0"?>
+    \\<gpx><metadata><name>Two checkpoints</name></metadata>
+    \\<wpt lat="45.0000" lon="6.0000"><name>Start</name><type>Start</type></wpt>
+    \\<wpt lat="45.0020" lon="6.0000"><name>Finish</name><type>Arrival</type></wpt>
+    \\<trk><trkseg>
+    \\<trkpt lat="45.0000" lon="6.0000"><ele>1000</ele></trkpt>
+    \\<trkpt lat="45.0010" lon="6.0000"><ele>1050</ele></trkpt>
+    \\<trkpt lat="45.0020" lon="6.0000"><ele>1020</ele></trkpt>
+    \\</trkseg></trk></gpx>
+;
+
+test "output_write --plan: the file's hash, the settings and one entry per checkpoint" {
+    const allocator = std.testing.allocator;
+    const settings: gpxz.Settings = .{ .pace_base_s_per_km = 400 };
+    var data = try gpxz.parse(allocator, test_gpx_checkpoints, &settings);
+    defer data.deinit(allocator);
+    const input: Input = .{ .bytes = test_gpx_checkpoints, .data = &data, .settings = &settings };
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try output_write(&out.writer, &input, .plan);
+    const parsed = try std.json.parseFromSlice(gpxz.Plan, allocator, out.written(), .{});
+    defer parsed.deinit();
+    const plan = parsed.value;
+    try std.testing.expectEqualStrings("Two checkpoints", plan.course.name.?);
+    const sha256 = gpxz.plan.course_sha256(test_gpx_checkpoints);
+    try std.testing.expectEqualStrings(&sha256, &plan.course.sha256);
+    try std.testing.expectEqual(@as(f64, 400), plan.model.pace_base_s_per_km);
+    try std.testing.expectEqual(data.plan.?.len, plan.entries.len);
+    try std.testing.expectEqual(@as(usize, 2), plan.entries.len);
+    try std.testing.expectEqualStrings("Finish", plan.entries[1].name);
 }

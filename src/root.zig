@@ -21,6 +21,7 @@ pub const calibration = @import("calibration.zig");
 pub const segment = @import("segment.zig");
 pub const minetti = @import("minetti.zig");
 pub const pace_model = @import("pace_model.zig");
+pub const plan = @import("plan.zig");
 
 pub const GPXData = gpx_data.GPXData;
 pub const Waypoint = gpx_data.Waypoint;
@@ -32,11 +33,14 @@ pub const LegStats = leg.LegStats;
 pub const SectionStats = section.SectionStats;
 pub const StageStats = stage.StageStats;
 pub const PlanEntry = calibration.PlanEntry;
+pub const Plan = plan.Plan;
 pub const WeatherLookup = pace_model.WeatherLookup;
 pub const Settings = pace_model.Settings;
 pub const ParseError = gpx.ParseError;
 pub const parse = gpx.parse;
 pub const waypoints_replace = gpx_write.waypoints_replace;
+pub const plan_build = plan.plan_build;
+pub const plan_write = plan.plan_write;
 
 test {
     std.testing.refAllDecls(@This());
