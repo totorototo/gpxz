@@ -14,15 +14,19 @@ Requires Zig 0.17.0.
 ```sh
 zig build run -- route.gpx                # text summary
 zig build run -- --json route.gpx         # the same, as JSON
+zig build run -- --plan route.gpx > plan.json   # the race plan, as plan.json
 zig build run -- --pace 420 --fatigue 0.004 --life-base-stop 1800 route.gpx
 ```
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--json` | off | Print totals, climbs, descents, waypoints, legs, sections, stages and the plan (per-checkpoint ETAs) as JSON |
+| `--plan` | off | Print the plan as `plan.json` (see below). Exits 1 if the route has fewer than 2 checkpoints |
 | `--pace <s/km>` | 500 (8:20/km) | Flat-terrain base pace |
 | `--fatigue <k>` | 0.002 | Cumulative fatigue coefficient |
 | `--life-base-stop <s>` | 3600 | Planned stop at each LifeBase |
+
+`--json` and `--plan` are one output mode each, so passing both is a usage error.
 
 The JSON leaves out the per-point arrays (distances, slopes, points), which run to several
 MiB on a long route.
@@ -71,6 +75,29 @@ Write the waypoints in route order: gpxz matches each one to the track after the
 so the order of the file is part of what it says. A waypoint that can't be written
 (`CoordinateInvalid`, `NumberInvalid`, `TimeOutOfRange`) is an error before anything is built,
 and a file that isn't GPX is `NotGpx`.
+
+## Plans
+
+`plan.json` is a race strategy for one course, kept apart from the GPX so a course can have
+several. It holds `schema_version` (1), `course` (name, `distance_m`, and the `sha256` of the
+GPX bytes), `model` (base pace, fatigue, LifeBase stop) and one entry per checkpoint with its
+arrival, stop and departure times.
+
+```zig
+const plan = gpxz.plan_build(bytes, data.metadata.name, data.trace.distance_m, data.plan.?, &settings);
+try gpxz.plan_write(writer, &plan);
+
+const parsed = try gpxz.plan_read(allocator, plan_bytes);
+defer parsed.deinit();
+if (!gpxz.plan.course_matches(&parsed.value, gpx_bytes)) {
+    // The plan was made for another file, or for an edited one.
+}
+```
+
+`plan_read` checks the version first, so a newer file is `SchemaVersionUnsupported`, then
+rejects an inconsistent plan with `PlanInvalid` (gpxz always reads back what it writes).
+Matching is on the exact bytes: any edit to the GPX makes the plan stale. Weather isn't part
+of v1, so a plan can't be built from settings that include a weather lookup.
 
 ## Tests
 
