@@ -79,12 +79,32 @@ and a file that isn't GPX is `NotGpx`.
 ## Plans
 
 `plan.json` is a race strategy for one course, kept apart from the GPX so a course can have
-several. It holds `schema_version` (1), `course` (name, `distance_m`, and the `sha256` of the
-GPX bytes), `model` (base pace, fatigue, LifeBase stop) and one entry per checkpoint with its
-arrival, stop and departure times.
+several. It holds `schema_version` (2), `course` (name, `distance_m`, and the `sha256` of the
+GPX bytes), `model` (base pace, fatigue, LifeBase stop, and optional `fueling`), one entry per
+checkpoint with its arrival, stop and departure times, and `carry`: with fueling, what to
+leave each checkpoint with until the next refill.
+
+`model.fueling` holds hourly targets (`carbs_g_per_h`, `fluid_ml_per_h`, `sodium_mg_per_h`),
+a `reserve_s` added to every carry, and `supplies`, one per entry: `none`, `water` (fluid
+only) or `full`. Fueling is strategy, so it is never read from the GPX;
+`fueling.supplies_default` seeds `full` at the Start and every LifeBase.
 
 ```zig
-const plan = gpxz.plan_build(bytes, data.metadata.name, data.trace.distance_m, data.plan.?, &settings);
+var supplies: [entries.len]gpxz.fueling.Supply = undefined;
+gpxz.fueling.supplies_default(entries, &supplies);
+const fuel: gpxz.fueling.Fueling = .{ .carbs_g_per_h = 70, .fluid_ml_per_h = 500,
+    .sodium_mg_per_h = 400, .reserve_s = 1800, .supplies = &supplies };
+var times: [entries.len]gpxz.fueling.Times = undefined;
+gpxz.fueling.times_from_entries(entries, &times);
+var carry: [entries.len]?gpxz.fueling.Carry = undefined;
+gpxz.fueling.carry_compute(&times, &fuel, &carry);
+const fuel_plan: gpxz.fueling.FuelPlan = .{ .fueling = fuel, .carry = &carry };
+```
+
+```zig
+// The last argument is the optional fueling: null for none, or &fuel_plan.
+const plan = gpxz.plan_build(bytes, data.metadata.name, data.trace.distance_m, data.plan.?,
+    &settings, null);
 try gpxz.plan_write(writer, &plan);
 
 const parsed = try gpxz.plan_read(allocator, plan_bytes);
@@ -94,10 +114,12 @@ if (!gpxz.plan.course_matches(&parsed.value, gpx_bytes)) {
 }
 ```
 
-`plan_read` checks the version first, so a newer file is `SchemaVersionUnsupported`, then
-rejects an inconsistent plan with `PlanInvalid` (gpxz always reads back what it writes).
+`plan_read` checks the version first, so a newer file is `SchemaVersionUnsupported` (v1
+files still read, with no fueling), then rejects an inconsistent plan with `PlanInvalid`: the
+carry must be exactly what `carry_compute` gives for the entries (gpxz always reads back what
+it writes, and writes v2 only).
 Matching is on the exact bytes: any edit to the GPX makes the plan stale. Weather isn't part
-of v1, so a plan can't be built from settings that include a weather lookup.
+of the schema, so a plan can't be built from settings that include a weather lookup.
 
 ## Tests
 

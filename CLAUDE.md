@@ -21,13 +21,21 @@ linked yet.
   - `xml_text.zig`: entities, numeric references and CDATA read as text, and text escaped
     for writing. Names and descriptions are decoded when read, so a write never escapes twice.
   - `plan.zig`: `plan.json`, the race strategy for one course, owned by gpxz and separate
-    from the extended GPX (several plans per course). v1 is `schema_version`, `course`
-    (name, `sha256` of the GPX bytes, `distance_m`), `model` (`Settings` minus weather) and
-    `entries` (`PlanEntry`). `plan_build` borrows `GPXData.plan`; `plan_write` writes it;
-    `plan_read` returns an owned `std.json.Parsed(Plan)`; `course_matches` compares the hash.
-    `plan_valid` is the one definition of a valid plan: the builder asserts it, the reader
-    returns `error.PlanInvalid` without it. Weather isn't in v1, so building with a weather
-    lookup is an assert. Bump `schema_version` for any change a v1 reader can't read.
+    from the extended GPX (several plans per course). v2 is `schema_version`, `course`
+    (name, `sha256` of the GPX bytes, `distance_m`), `model` (`Settings` minus weather, plus
+    `fueling`), `entries` (`PlanEntry`) and `carry` (one `?Carry` per entry, empty without
+    fueling). `plan_build` borrows `GPXData.plan` and an optional `FuelPlan`; `plan_write`
+    writes v2 only; `plan_read` reads v1 and v2 and returns an owned
+    `std.json.Parsed(Plan)`; `course_matches` compares the hash. `plan_valid` is the one
+    definition of a valid plan: the builder asserts it, the reader returns
+    `error.PlanInvalid` without it. Weather isn't in the schema, so building with a weather
+    lookup is an assert. Bump `schema_version` for any field change (the reader rejects
+    unknown fields); give new fields defaults so older files still parse.
+  - `fueling.zig`: hourly targets, refill points (`Supply`: none, water, full) and the
+    carry to the next refill, as a pass over finished times. Not a pace model input:
+    `Settings` and `PlanEntry` know nothing of it. `carry_compute` (on `Times`, so live ETAs
+    work too) and `carry_matches` (allocation-free, for `plan_valid`) share one leaf.
+    `supplies_default` seeds full at the Start and LifeBases.
   - `gpx.zig`: GPX parsing by manual `std.mem` scanning (no XML library). `parse(allocator,
     bytes, &settings)` → `GPXData { trace, waypoints, legs, sections, stages, metadata,
     points_full_resolution }` is the main entry point. A malformed element is a

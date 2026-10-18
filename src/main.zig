@@ -153,6 +153,7 @@ fn output_write(writer: *std.Io.Writer, input: *const Input, output: Output) !vo
                 input.data.trace.distance_m,
                 entries,
                 input.settings,
+                null,
             );
             try gpxz.plan_write(writer, &plan);
         },

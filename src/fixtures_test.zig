@@ -259,7 +259,14 @@ fn plan_file_check(bytes: []const u8) !void {
     var data = try gpxz.parse(testing.allocator, bytes, &.{});
     defer data.deinit(testing.allocator);
     const entries = data.plan.?;
-    const plan = gpxz.plan_build(bytes, data.metadata.name, data.trace.distance_m, entries, &.{});
+    const plan = gpxz.plan_build(
+        bytes,
+        data.metadata.name,
+        data.trace.distance_m,
+        entries,
+        &.{},
+        null,
+    );
 
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();

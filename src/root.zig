@@ -22,6 +22,7 @@ pub const segment = @import("segment.zig");
 pub const minetti = @import("minetti.zig");
 pub const pace_model = @import("pace_model.zig");
 pub const plan = @import("plan.zig");
+pub const fueling = @import("fueling.zig");
 
 pub const GPXData = gpx_data.GPXData;
 pub const Waypoint = gpx_data.Waypoint;
