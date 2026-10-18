@@ -62,7 +62,6 @@ pub fn plan_build(
     // v1 has no weather field: writing a plan whose times depend on one would lose an input.
     assert(settings.weather.names.len == 0);
     assert(distance_m >= 0 and std.math.isFinite(distance_m));
-    entries_assert_valid(entries, distance_m);
     const plan: Plan = .{
         .schema_version = schema_version,
         .course = .{ .name = name, .sha256 = course_sha256(bytes), .distance_m = distance_m },
@@ -74,30 +73,120 @@ pub fn plan_build(
         .entries = entries,
     };
     assert(plan.entries.len == entries.len);
+    // Paired with `plan_read`: a plan gpxz writes is always one it reads back.
+    assert(plan_valid(&plan));
     return plan;
 }
 
-/// The invariants `calibration.plan_compute` guarantees, so a plan never carries entries that
-/// a reader would have to reject.
-fn entries_assert_valid(entries: []const PlanEntry, distance_m: f64) void {
-    var departure_s_previous: f64 = 0.0;
-    var distance_m_previous: f64 = 0.0;
-    for (entries) |*entry| {
-        assert(entry.stop_s >= 0);
-        assert(entry.duration_s_arrival >= departure_s_previous);
-        assert(entry.duration_s_departure == entry.duration_s_arrival + entry.stop_s);
-        assert(entry.distance_m >= distance_m_previous);
-        // Distances count from the first checkpoint, so they never pass the whole trace.
-        assert(entry.distance_m <= distance_m);
-        departure_s_previous = entry.duration_s_departure;
-        distance_m_previous = entry.distance_m;
+/// Whether `plan` holds the invariants `calibration.plan_compute` guarantees. The builder
+/// asserts it and the reader returns `error.PlanInvalid` without it, so the two agree on what a
+/// valid plan is.
+pub fn plan_valid(plan: *const Plan) bool {
+    if (plan.schema_version != schema_version) return false;
+    if (!sha256_hex_valid(&plan.course.sha256)) return false;
+    if (!(plan.course.distance_m >= 0) or !std.math.isFinite(plan.course.distance_m)) return false;
+    const model = &plan.model;
+    if (!(model.pace_base_s_per_km > 0) or !std.math.isFinite(model.pace_base_s_per_km)) {
+        return false;
     }
+    if (!(model.fatigue_coefficient >= 0) or !std.math.isFinite(model.fatigue_coefficient)) {
+        return false;
+    }
+    return entries_valid(plan.entries, plan.course.distance_m);
+}
+
+/// Lowercase only, as `course_sha256` writes it, so comparing two hashes is a byte compare.
+fn sha256_hex_valid(hex: *const Sha256Hex) bool {
+    for (hex) |character| {
+        const digit = character >= '0' and character <= '9';
+        const letter = character >= 'a' and character <= 'f';
+        if (!digit and !letter) return false;
+    }
+    return true;
+}
+
+/// Entries run in race order from the first checkpoint: every cumulative value counts up from 0
+/// and never passes the course, and each arrival comes after the previous departure.
+fn entries_valid(entries: []const PlanEntry, distance_m_course: f64) bool {
+    if (entries.len == 0) return true;
+    if (entries[0].distance_m != 0 or entries[0].duration_s_arrival != 0) return false;
+    var previous = entries[0];
+    for (entries, 0..) |*entry, number| {
+        if (!entry_valid(entry, distance_m_course)) return false;
+        if (number == 0) continue;
+        if (entry.index < previous.index) return false;
+        if (entry.distance_m < previous.distance_m) return false;
+        if (entry.elevation_gain_m < previous.elevation_gain_m) return false;
+        if (entry.elevation_loss_m < previous.elevation_loss_m) return false;
+        if (entry.duration_s_arrival < previous.duration_s_departure) return false;
+        previous = entry.*;
+    }
+    return true;
+}
+
+/// One entry on its own: finite numbers, coordinates on the globe, no negative stop, and a
+/// departure that is exactly arrival plus stop. Exact, because JSON f64 round-trips exactly
+/// and an editor that changes one of the three must recompute the third.
+fn entry_valid(entry: *const PlanEntry, distance_m_course: f64) bool {
+    const values = [_]f64{
+        entry.latitude,           entry.longitude,        entry.elevation_m,
+        entry.distance_m,         entry.elevation_gain_m, entry.elevation_loss_m,
+        entry.duration_s_arrival, entry.stop_s,           entry.duration_s_departure,
+        entry.margin_s orelse 0,
+    };
+    for (values) |value| if (!std.math.isFinite(value)) return false;
+    if (@abs(entry.latitude) > 90 or @abs(entry.longitude) > 180) return false;
+    if (entry.distance_m < 0 or entry.distance_m > distance_m_course) return false;
+    if (entry.elevation_gain_m < 0 or entry.elevation_loss_m < 0) return false;
+    if (entry.stop_s < 0) return false;
+    return entry.duration_s_departure == entry.duration_s_arrival + entry.stop_s;
+}
+
+/// A plan is a few KiB per hundred checkpoints; this bounds what a reader allocates for one.
+pub const plan_bytes_max = 4 * 1024 * 1024;
+
+pub const ReadError = std.json.ParseError(std.json.Scanner) || error{
+    PlanTooLarge,
+    SchemaVersionUnsupported,
+    PlanInvalid,
+};
+
+/// Parses and validates `plan.json` bytes. The result owns every string and the entries (it
+/// copies them out of `bytes`), and the caller frees it with `deinit`. Checking the course is
+/// separate (`course_matches`), since a reader may want to show a plan for a missing course.
+pub fn plan_read(allocator: std.mem.Allocator, bytes: []const u8) ReadError!std.json.Parsed(Plan) {
+    if (bytes.len > plan_bytes_max) return error.PlanTooLarge;
+    // The version first, ignoring the rest, so a v2 file is "unsupported" rather than whatever
+    // v1's strict parse would trip on.
+    const Version = struct { schema_version: u32 };
+    const version = try std.json.parseFromSlice(Version, allocator, bytes, .{
+        .ignore_unknown_fields = true,
+    });
+    const version_number = version.value.schema_version;
+    version.deinit();
+    if (version_number != schema_version) return error.SchemaVersionUnsupported;
+
+    const parsed = try std.json.parseFromSlice(Plan, allocator, bytes, .{
+        .allocate = .alloc_always,
+    });
+    errdefer parsed.deinit();
+    if (!plan_valid(&parsed.value)) return error.PlanInvalid;
+    assert(parsed.value.schema_version == schema_version);
+    return parsed;
+}
+
+/// Whether `plan` was made for the course in `bytes`: the exact bytes, so any edit to the GPX,
+/// even one that leaves the route unchanged, makes the plan stale.
+pub fn course_matches(plan: *const Plan, bytes: []const u8) bool {
+    assert(sha256_hex_valid(&plan.course.sha256));
+    const hex = course_sha256(bytes);
+    assert(sha256_hex_valid(&hex));
+    return std.mem.eql(u8, &hex, &plan.course.sha256);
 }
 
 /// Writes `plan` as `plan.json`: indented JSON with a trailing newline.
 pub fn plan_write(writer: *std.Io.Writer, plan: *const Plan) std.Io.Writer.Error!void {
-    assert(plan.schema_version == schema_version);
-    assert(plan.course.sha256.len == 64);
+    assert(plan_valid(plan));
     const options: std.json.Stringify.Options = .{ .whitespace = .indent_2 };
     try std.json.Stringify.value(plan.*, options, writer);
     try writer.writeByte('\n');
@@ -199,4 +288,151 @@ test "plan_write: round-trips through std.json into Plan" {
     try testing.expectEqualStrings(&plan.course.sha256, &parsed.value.course.sha256);
     try testing.expectEqual(plan.model, parsed.value.model);
     try testing.expectEqual(@as(f64, 1800), parsed.value.entries[1].duration_s_arrival);
+}
+
+/// A valid two-entry plan for the reader tests to break one field at a time.
+fn plan_test(entries: *[2]PlanEntry) Plan {
+    entries.* = .{ entry_test("Start", 0, 0, 0), entry_test("End", 5000, 1800, 600) };
+    return plan_build("<gpx/>", "Loop", 5000, entries, &.{});
+}
+
+/// Serializes without `plan_write`'s assert, so a test can write a plan gpxz never would.
+fn json_test(plan: *const Plan) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    errdefer out.deinit();
+    try std.json.Stringify.value(plan.*, .{}, &out.writer);
+    return out.toOwnedSlice();
+}
+
+test "plan_read: reads what plan_write wrote, and owns it" {
+    var entries: [2]PlanEntry = undefined;
+    const plan = plan_test(&entries);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try plan_write(&out.writer, &plan);
+    const bytes = try testing.allocator.dupe(u8, out.written());
+
+    const parsed = try plan_read(testing.allocator, bytes);
+    defer parsed.deinit();
+    // The input is gone; the strings must not point into it.
+    @memset(bytes, 0);
+    testing.allocator.free(bytes);
+    try testing.expectEqualStrings("Loop", parsed.value.course.name.?);
+    try testing.expectEqualStrings("End", parsed.value.entries[1].name);
+    try testing.expectEqual(plan.model, parsed.value.model);
+    try testing.expectEqual(@as(f64, 2400), parsed.value.entries[1].duration_s_departure);
+}
+
+test "plan_read: zero entries and a null name are valid" {
+    const plan = plan_build("", null, 0, &.{}, &.{});
+    const bytes = try json_test(&plan);
+    defer testing.allocator.free(bytes);
+    const parsed = try plan_read(testing.allocator, bytes);
+    defer parsed.deinit();
+    try testing.expect(parsed.value.course.name == null);
+    try testing.expectEqual(@as(usize, 0), parsed.value.entries.len);
+}
+
+test "plan_read: other schema versions, missing version, not JSON, unknown v1 field" {
+    const allocator = testing.allocator;
+    // A v2 file with fields v1 doesn't know: unsupported, not a v1 parse error.
+    const v2 = "{\"schema_version\": 2, \"segments\": [], \"course\": 7}";
+    try testing.expectError(error.SchemaVersionUnsupported, plan_read(allocator, v2));
+    const v0 = "{\"schema_version\": 0}";
+    try testing.expectError(error.SchemaVersionUnsupported, plan_read(allocator, v0));
+    try testing.expectError(error.MissingField, plan_read(allocator, "{\"course\": {}}"));
+    try testing.expectError(error.SyntaxError, plan_read(allocator, "not json"));
+    try testing.expectError(error.UnexpectedEndOfInput, plan_read(allocator, ""));
+    const negative = "{\"schema_version\": -1}";
+    try testing.expectError(error.Overflow, plan_read(allocator, negative));
+
+    var entries: [2]PlanEntry = undefined;
+    const plan = plan_test(&entries);
+    const bytes = try json_test(&plan);
+    defer allocator.free(bytes);
+    const extra = try std.mem.concat(allocator, u8, &.{ bytes[0 .. bytes.len - 1], ",\"x\":1}" });
+    defer allocator.free(extra);
+    try testing.expectError(error.UnknownField, plan_read(allocator, extra));
+}
+
+test "plan_read: plan_bytes_max is accepted, one byte more is not" {
+    const allocator = testing.allocator;
+    var entries: [2]PlanEntry = undefined;
+    const plan = plan_test(&entries);
+    const bytes = try json_test(&plan);
+    defer allocator.free(bytes);
+    // Trailing whitespace pads a valid plan to an exact length.
+    const padded = try allocator.alloc(u8, plan_bytes_max + 1);
+    defer allocator.free(padded);
+    @memset(padded, ' ');
+    @memcpy(padded[0..bytes.len], bytes);
+    const parsed = try plan_read(allocator, padded[0..plan_bytes_max]);
+    parsed.deinit();
+    try testing.expectError(error.PlanTooLarge, plan_read(allocator, padded));
+}
+
+test "plan_read: each broken invariant is PlanInvalid" {
+    const Break = enum {
+        departure,
+        stop_negative,
+        arrival_early,
+        distance_past_course,
+        distance_backwards,
+        first_not_zero,
+        latitude,
+        sha256_uppercase,
+        sha256_not_hex,
+        pace_zero,
+        fatigue_negative,
+    };
+    for (std.enums.values(Break)) |which| {
+        var entries: [2]PlanEntry = undefined;
+        var plan = plan_test(&entries);
+        switch (which) {
+            .departure => entries[1].duration_s_departure += 1,
+            .stop_negative => {
+                entries[1].stop_s = -1;
+                entries[1].duration_s_departure = entries[1].duration_s_arrival - 1;
+            },
+            .arrival_early => entries[0].duration_s_departure = 3600,
+            .distance_past_course => entries[1].distance_m = 5001,
+            .distance_backwards => entries[1].distance_m = -1,
+            .first_not_zero => entries[0].distance_m = 1,
+            .latitude => entries[1].latitude = 90.5,
+            .sha256_uppercase => plan.course.sha256[0] = 'A',
+            .sha256_not_hex => plan.course.sha256[63] = 'g',
+            .pace_zero => plan.model.pace_base_s_per_km = 0,
+            .fatigue_negative => plan.model.fatigue_coefficient = -0.001,
+        }
+        try testing.expect(!plan_valid(&plan));
+        const bytes = try json_test(&plan);
+        defer testing.allocator.free(bytes);
+        try testing.expectError(error.PlanInvalid, plan_read(testing.allocator, bytes));
+    }
+}
+
+test "plan_read: a non-finite number is PlanInvalid, a short hash a parse error" {
+    const allocator = testing.allocator;
+    var entries: [2]PlanEntry = undefined;
+    const plan = plan_test(&entries);
+    const bytes = try json_test(&plan);
+    defer allocator.free(bytes);
+    // std.json reads a float from a string, so "nan" reaches the validator as a NaN.
+    const stop_s = "\"stop_s\":600";
+    const nan = try std.mem.replaceOwned(u8, allocator, bytes, stop_s, "\"stop_s\":\"nan\"");
+    defer allocator.free(nan);
+    try testing.expect(!std.mem.eql(u8, nan, bytes));
+    try testing.expectError(error.PlanInvalid, plan_read(allocator, nan));
+
+    const short = try std.mem.replaceOwned(u8, allocator, bytes, &plan.course.sha256, "abc");
+    defer allocator.free(short);
+    try testing.expectError(error.LengthMismatch, plan_read(allocator, short));
+}
+
+test "course_matches: the same bytes match, one changed byte does not" {
+    var entries: [2]PlanEntry = undefined;
+    const plan = plan_test(&entries);
+    try testing.expect(course_matches(&plan, "<gpx/>"));
+    try testing.expect(!course_matches(&plan, "<gpx />"));
+    try testing.expect(!course_matches(&plan, ""));
 }

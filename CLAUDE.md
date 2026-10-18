@@ -9,16 +9,25 @@ cutoff margins. Extracted from terminus's `zig/` directory (history kept with
 linked yet.
 
 - `src/root.zig`: the library entry point. Re-exports every module and the main types.
-- `src/main.zig`: the CLI (`zig build run -- [--json] [--pace <s/km>] [--fatigue <k>]
-  [--life-base-stop <s>] file.gpx`). All I/O lives here. The default output is a text
-  summary; `--json` prints totals, climbs, descents, waypoints, legs, sections, stages and the plan, without the
-  per-point arrays.
+- `src/main.zig`: the CLI (`zig build run -- [--json | --plan] [--pace <s/km>]
+  [--fatigue <k>] [--life-base-stop <s>] file.gpx`). All I/O lives here. The default output
+  is a text summary; `--json` prints totals, climbs, descents, waypoints, legs, sections,
+  stages and the plan, without the per-point arrays; `--plan` prints `plan.json`. The modes
+  are one `Output` enum, so asking for two is a usage error.
 - The library is pure and does no I/O: bytes and slices in, owned structs out.
   - `gpx_write.zig`: `waypoints_replace(allocator, bytes, waypoints)` rewrites a file's
     `<wpt>` elements and nothing else, byte for byte; `waypoint_write` writes one. The
     waypoints must be in route order (gpxz matches them to the track in file order).
   - `xml_text.zig`: entities, numeric references and CDATA read as text, and text escaped
     for writing. Names and descriptions are decoded when read, so a write never escapes twice.
+  - `plan.zig`: `plan.json`, the race strategy for one course, owned by gpxz and separate
+    from the extended GPX (several plans per course). v1 is `schema_version`, `course`
+    (name, `sha256` of the GPX bytes, `distance_m`), `model` (`Settings` minus weather) and
+    `entries` (`PlanEntry`). `plan_build` borrows `GPXData.plan`; `plan_write` writes it;
+    `plan_read` returns an owned `std.json.Parsed(Plan)`; `course_matches` compares the hash.
+    `plan_valid` is the one definition of a valid plan: the builder asserts it, the reader
+    returns `error.PlanInvalid` without it. Weather isn't in v1, so building with a weather
+    lookup is an assert. Bump `schema_version` for any change a v1 reader can't read.
   - `gpx.zig`: GPX parsing by manual `std.mem` scanning (no XML library). `parse(allocator,
     bytes, &settings)` → `GPXData { trace, waypoints, legs, sections, stages, metadata,
     points_full_resolution }` is the main entry point. A malformed element is a

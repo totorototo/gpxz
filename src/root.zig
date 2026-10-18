@@ -41,6 +41,7 @@ pub const parse = gpx.parse;
 pub const waypoints_replace = gpx_write.waypoints_replace;
 pub const plan_build = plan.plan_build;
 pub const plan_write = plan.plan_write;
+pub const plan_read = plan.plan_read;
 
 test {
     std.testing.refAllDecls(@This());

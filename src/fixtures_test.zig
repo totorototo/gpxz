@@ -251,3 +251,41 @@ test "every fixture: its waypoints written back leave the route and the plan as 
         try round_trip_check(@embedFile(name));
     }
 }
+
+/// plan.json from a real route: gpxz reads back what it writes, for the bytes it hashed and no
+/// others.
+fn plan_file_check(bytes: []const u8) !void {
+    assert(bytes.len > 0);
+    var data = try gpxz.parse(testing.allocator, bytes, &.{});
+    defer data.deinit(testing.allocator);
+    const entries = data.plan.?;
+    const plan = gpxz.plan_build(bytes, data.metadata.name, data.trace.distance_m, entries, &.{});
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try gpxz.plan_write(&out.writer, &plan);
+    const parsed = try gpxz.plan_read(testing.allocator, out.written());
+    defer parsed.deinit();
+    try testing.expect(gpxz.plan.course_matches(&parsed.value, bytes));
+    try testing.expect(!gpxz.plan.course_matches(&parsed.value, bytes[0 .. bytes.len - 1]));
+    try testing.expectEqual(entries.len, parsed.value.entries.len);
+    for (entries, parsed.value.entries) |expected, actual| {
+        try testing.expectEqualStrings(expected.name, actual.name);
+        try testing.expectEqual(expected.duration_s_departure, actual.duration_s_departure);
+        try testing.expectEqual(expected.margin_s, actual.margin_s);
+    }
+}
+
+test "every fixture: plan.json reads back as written, and matches only its own bytes" {
+    inline for (.{
+        "grp-40-gela-2026.gpx",
+        "grp-40-neouvielle-2026.gpx",
+        "grp-50-2026.gpx",
+        "grp-60-2026.gpx",
+        "grp-80-2026.gpx",
+        "grp-120-2026.gpx",
+        "grp-160-2026.gpx",
+    }) |name| {
+        try plan_file_check(@embedFile(name));
+    }
+}
