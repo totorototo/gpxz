@@ -133,3 +133,7 @@ on them:
 ```sh
 zig build bench
 ```
+
+## License
+
+MIT, see `LICENSE`.
