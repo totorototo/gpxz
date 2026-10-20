@@ -5,8 +5,8 @@
 Minimal Zig library + CLI for GPX trail routes: parsing, distances, denoised D+/D-, climbs and descents,
 sections and stages between typed waypoints, and a pace model that estimates durations and
 cutoff margins. Extracted from terminus's `zig/` directory (history kept with
-`git subtree split`). Terminus, Waymark, Regimen and Retrace (through debriefz) now pin gpxz
-by commit in their `zig/build.zig.zon` and build it to WebAssembly through Zigar.
+`git subtree split`). Terminus, Waymark, Regimen and Retrace (through debriefz) pin gpxz's
+latest release in their `zig/build.zig.zon` and build it to WebAssembly through Zigar.
 
 - `src/root.zig`: the library entry point. Re-exports every module and the main types.
 - `src/main.zig`: the CLI (`zig build run -- [--json | --plan] [--pace <s/km>]
@@ -54,6 +54,10 @@ by commit in their `zig/build.zig.zon` and build it to WebAssembly through Zigar
     `segment.zig` (per-point metrics).
 - **Names are JSON keys**: struct fields serialize as-is in `--json` and reach JavaScript
   through Zigar in the apps, so renaming a public field changes both outputs.
+- **Releases are `vX.Y.Z` tags**, with `.version` in `build.zig.zon` to match. The apps' CI
+  (`scripts/check-pins.mjs`) wants gpxz at its newest release: a commit on main reaches no
+  app until it is tagged, and a new tag fails every app's CI until that app bumps
+  (`zig fetch --save=gpxz git+https://github.com/totorototo/gpxz#vX.Y.Z`).
 - **Error policy**: an error is for invalid external bytes (a malformed GPX). An `assert` is
   for library invariants, so a failed assert means a bug in gpxz, never a bad file.
 - **Targets Zig 0.17.0**: I/O needs an explicit `std.Io`, `main` takes `std.process.Init`,
