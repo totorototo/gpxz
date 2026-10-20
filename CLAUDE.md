@@ -5,8 +5,8 @@
 Minimal Zig library + CLI for GPX trail routes: parsing, distances, denoised D+/D-, climbs and descents,
 sections and stages between typed waypoints, and a pace model that estimates durations and
 cutoff margins. Extracted from terminus's `zig/` directory (history kept with
-`git subtree split`); terminus still builds its own copy through Zigar, and the two are not
-linked yet.
+`git subtree split`). Terminus, Waymark, Regimen and Retrace (through debriefz) now pin gpxz
+by commit in their `zig/build.zig.zon` and build it to WebAssembly through Zigar.
 
 - `src/root.zig`: the library entry point. Re-exports every module and the main types.
 - `src/main.zig`: the CLI (`zig build run -- [--json | --plan] [--pace <s/km>]
@@ -53,7 +53,7 @@ linked yet.
   - `minetti.zig` (slope cost), `pace_model.zig` (slope × fatigue × circadian × weather),
     `segment.zig` (per-point metrics).
 - **Names are JSON keys**: struct fields serialize as-is in `--json` and reach JavaScript
-  through Zigar in terminus, so renaming a public field changes both outputs.
+  through Zigar in the apps, so renaming a public field changes both outputs.
 - **Error policy**: an error is for invalid external bytes (a malformed GPX). An `assert` is
   for library invariants, so a failed assert means a bug in gpxz, never a bad file.
 - **Targets Zig 0.17.0**: I/O needs an explicit `std.Io`, `main` takes `std.process.Init`,
