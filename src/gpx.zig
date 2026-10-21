@@ -31,7 +31,20 @@ pub const ParseError = error{
     NumberInvalid,
     /// A `<time>` isn't an ISO 8601 UTC or offset timestamp.
     TimeInvalid,
+    /// The file is over `bytes_max`.
+    FileTooLarge,
+    /// The file has more than `points_max` track points.
+    PointsTooMany,
+    /// The file has more than `waypoints_max` waypoints.
+    WaypointsTooMany,
 };
+
+/// Caps on untrusted input, so a hostile or broken file can't take the browser's memory.
+/// TOR330, the longest race here, is 4.1 MB, 37 399 points and a few dozen waypoints: the
+/// caps leave a 15× margin on size and 25× on points.
+pub const bytes_max = 64 * 1024 * 1024;
+pub const points_max = 1_000_000;
+pub const waypoints_max = 10_000;
 
 /// Parses a GPX file and computes everything gpxz derives from it. The caller owns the
 /// result and frees it with `deinit`.
@@ -39,8 +52,9 @@ pub fn parse(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     settings: *const pace_model.Settings,
-) (ParseError || std.mem.Allocator.Error)!GPXData {
-    settings.assert_valid();
+) (ParseError || pace_model.SettingsError || std.mem.Allocator.Error)!GPXData {
+    try settings.validate();
+    if (bytes.len > bytes_max) return error.FileTooLarge;
     var metadata = try metadata_read(allocator, bytes);
     errdefer metadata.deinit(allocator);
     const points = try trace_points_read(allocator, bytes);
@@ -96,8 +110,10 @@ pub fn trace_points_read(
         const elevation_text = try child_text(element.content, "ele") orelse
             return error.ElevationMissing;
         const elevation_m = try number_parse(elevation_text);
+        if (points.items.len == points_max) return error.PointsTooMany;
         try points.append(allocator, .{ coordinates[0], coordinates[1], elevation_m });
     }
+    assert(points.items.len <= points_max);
     // Every point passed coordinates_parse: gps_point asserts the same range on each.
     for (points.items) |point| assert(coordinates_valid(point[0], point[1]));
     return points.toOwnedSlice(allocator);
@@ -119,8 +135,10 @@ pub fn waypoints_read(
         var waypoint = try waypoint_parse(allocator, &element);
         errdefer waypoint.deinit(allocator);
         assert(coordinates_valid(waypoint.latitude, waypoint.longitude));
+        if (waypoints.items.len == waypoints_max) return error.WaypointsTooMany;
         try waypoints.append(allocator, waypoint);
     }
+    assert(waypoints.items.len <= waypoints_max);
     return waypoints.toOwnedSlice(allocator);
 }
 
@@ -747,4 +765,45 @@ test "recalibrate_bytes: null with fewer than two boundaries" {
     defer pair.deinit(testing.allocator);
     try testing.expectEqual(@as(?calibration.Recalibration, null), pair.section);
     try testing.expectEqual(@as(?calibration.Recalibration, null), pair.stage);
+}
+
+test "parse: settings out of range are SettingsInvalid, before any byte is read" {
+    const settings: pace_model.Settings = .{ .pace_base_s_per_km = 0 };
+    try testing.expectError(
+        error.SettingsInvalid,
+        parse(testing.allocator, "not even a GPX", &settings),
+    );
+}
+
+test "parse: a file over bytes_max is FileTooLarge" {
+    const bytes = try testing.allocator.alloc(u8, bytes_max + 1);
+    defer testing.allocator.free(bytes);
+    @memset(bytes, ' ');
+    try testing.expectError(error.FileTooLarge, parse(testing.allocator, bytes, &.{}));
+}
+
+test "trace_points_read: points_max points are read, one more is PointsTooMany" {
+    const point = "<trkpt lat=\"0\" lon=\"0\"><ele>0</ele></trkpt>";
+    const bytes = try testing.allocator.alloc(u8, point.len * (points_max + 1));
+    defer testing.allocator.free(bytes);
+    for (0..points_max + 1) |index| @memcpy(bytes[index * point.len ..][0..point.len], point);
+
+    const at_max = try trace_points_read(testing.allocator, bytes[0 .. point.len * points_max]);
+    defer testing.allocator.free(at_max);
+    try testing.expectEqual(@as(usize, points_max), at_max.len);
+    try testing.expectError(error.PointsTooMany, trace_points_read(testing.allocator, bytes));
+}
+
+test "waypoints_read: waypoints_max waypoints are read, one more is WaypointsTooMany" {
+    const waypoint = "<wpt lat=\"0\" lon=\"0\"><name>W</name></wpt>";
+    const bytes = try testing.allocator.alloc(u8, waypoint.len * (waypoints_max + 1));
+    defer testing.allocator.free(bytes);
+    for (0..waypoints_max + 1) |index| {
+        @memcpy(bytes[index * waypoint.len ..][0..waypoint.len], waypoint);
+    }
+
+    const at_max = try waypoints_read(testing.allocator, bytes[0 .. waypoint.len * waypoints_max]);
+    defer waypoints_free(testing.allocator, at_max);
+    try testing.expectEqual(@as(usize, waypoints_max), at_max.len);
+    try testing.expectError(error.WaypointsTooMany, waypoints_read(testing.allocator, bytes));
 }

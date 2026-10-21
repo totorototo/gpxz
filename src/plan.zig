@@ -107,13 +107,13 @@ pub fn plan_valid(plan: *const Plan) bool {
     if (plan.schema_version > schema_version) return false;
     if (!sha256_hex_valid(&plan.course.sha256)) return false;
     if (!(plan.course.distance_m >= 0) or !std.math.isFinite(plan.course.distance_m)) return false;
-    const model = &plan.model;
-    if (!(model.pace_base_s_per_km > 0) or !std.math.isFinite(model.pace_base_s_per_km)) {
-        return false;
-    }
-    if (!(model.fatigue_coefficient >= 0) or !std.math.isFinite(model.fatigue_coefficient)) {
-        return false;
-    }
+    // The model is the runner's settings: the same ranges as any other input.
+    const settings: pace_model.Settings = .{
+        .pace_base_s_per_km = plan.model.pace_base_s_per_km,
+        .fatigue_coefficient = plan.model.fatigue_coefficient,
+        .life_base_stop_s = plan.model.life_base_stop_s,
+    };
+    settings.validate() catch return false;
     if (!entries_valid(plan.entries, plan.course.distance_m)) return false;
     return fuel_valid(plan);
 }
@@ -424,7 +424,10 @@ test "plan_read: each broken invariant is PlanInvalid" {
         sha256_uppercase,
         sha256_not_hex,
         pace_zero,
+        pace_over_max,
         fatigue_negative,
+        fatigue_over_max,
+        stop_over_max,
     };
     for (std.enums.values(Break)) |which| {
         var entries: [2]PlanEntry = undefined;
@@ -443,7 +446,12 @@ test "plan_read: each broken invariant is PlanInvalid" {
             .sha256_uppercase => plan.course.sha256[0] = 'A',
             .sha256_not_hex => plan.course.sha256[63] = 'g',
             .pace_zero => plan.model.pace_base_s_per_km = 0,
+            .pace_over_max => plan.model.pace_base_s_per_km = pace_model.pace_base_s_per_km_max + 1,
             .fatigue_negative => plan.model.fatigue_coefficient = -0.001,
+            .fatigue_over_max => {
+                plan.model.fatigue_coefficient = pace_model.fatigue_coefficient_max + 0.001;
+            },
+            .stop_over_max => plan.model.life_base_stop_s = pace_model.life_base_stop_s_max + 1,
         }
         try testing.expect(!plan_valid(&plan));
         const bytes = try json_test(&plan);

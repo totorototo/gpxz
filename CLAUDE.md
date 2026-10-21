@@ -58,8 +58,16 @@ latest release in their `zig/build.zig.zon` and build it to WebAssembly through 
   (`scripts/check-pins.mjs`) wants gpxz at its newest release: a commit on main reaches no
   app until it is tagged, and a new tag fails every app's CI until that app bumps
   (`zig fetch --save=gpxz git+https://github.com/totorototo/gpxz#vX.Y.Z`).
-- **Error policy**: an error is for invalid external bytes (a malformed GPX). An `assert` is
-  for library invariants, so a failed assert means a bug in gpxz, never a bad file.
+- **Error policy**: an error is for invalid external input (a malformed GPX, settings out of
+  range). An `assert` is for library invariants, so a failed assert means a bug in gpxz, never
+  a bad file. The apps build ReleaseSmall, where a failed assert is undefined behaviour, so
+  every public function that takes outside input checks it and returns an error first.
+  - `Settings.validate` is the one range check for settings (`pace_model.zig`:
+    `pace_base_s_per_km_min/max`, `fatigue_coefficient_max`, `life_base_stop_s_max`). `parse`,
+    `plan_compute`, `recalibrate` and `plan_valid` all use it; `assert_valid` is for settings
+    already validated.
+  - `gpx.zig` caps untrusted input: `bytes_max` (64 MiB), `points_max` (1 000 000),
+    `waypoints_max` (10 000), as `FileTooLarge`, `PointsTooMany`, `WaypointsTooMany`.
 - **Targets Zig 0.17.0**: I/O needs an explicit `std.Io`, `main` takes `std.process.Init`,
   and containers are unmanaged (`.empty` + pass the allocator on each call).
   0.17: no `**` (use `@splat`), `@Int` replaces `std.meta.Int`, `@backingInt` /
