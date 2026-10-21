@@ -20,5 +20,8 @@ trail-passion.net printed in the link text.
 | `grp-120-2026.gpx` | Tour des Cirques, 125.8 km | One LifeBase, so two stages |
 | `grp-160-2026.gpx` | Ultra Tour, 174.7 km | The largest file (30899 points, 3 MB); two LifeBases, three stages |
 
+`grp-160-2026/` holds the same race through the suite's three steps: the race director's
+original, Waymark's extended file on the race's clock, and Regimen's plan. See its README.
+
 Don't add GPX files you recorded yourself: they hold your GPS tracks. `.gitignore` ignores
 `*.gpx` everywhere except here.

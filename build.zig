@@ -84,9 +84,18 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path(b.fmt("testdata/{s}", .{fixture})),
         });
     }
+    // The GRP 160 set: the race director's file, Waymark's extended file, Regimen's plan.
+    for (grp_160_set) |file| {
+        fixtures_module.addAnonymousImport(b.fmt("grp-160-2026.{s}", .{file}), .{
+            .root_source_file = b.path(b.fmt("testdata/grp-160-2026/{s}", .{file})),
+        });
+    }
     const fixtures_tests = b.addTest(.{ .root_module = fixtures_module });
     test_step.dependOn(&b.addRunArtifact(fixtures_tests).step);
 }
+
+/// testdata/grp-160-2026/, embedded as `grp-160-2026.<file>`. See its README.md.
+const grp_160_set = [_][]const u8{ "original.gpx", "extended.gpx", "plan.json" };
 
 /// Files in testdata/ that src/fixtures_test.zig embeds. See testdata/README.md.
 const fixtures = [_][]const u8{
