@@ -164,7 +164,9 @@ fn waypoint_parse(
     if (try child_text(content, "ele")) |text| waypoint.elevation_m = try number_parse(text);
     if (try child_text(content, "time")) |text| {
         const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
-        waypoint.epoch_s = time.iso8601_to_epoch_s(trimmed) catch return error.TimeInvalid;
+        const timestamp = time.iso8601_parse(trimmed) catch return error.TimeInvalid;
+        waypoint.epoch_s = timestamp.epoch_s;
+        waypoint.utc_offset_s = timestamp.utc_offset_s;
     }
     if (try child_text(content, "stopDuration")) |text| {
         const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);

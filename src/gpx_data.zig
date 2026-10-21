@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const time = @import("time.zig");
 const testing = std.testing;
 const LegStats = @import("leg.zig").LegStats;
 const SectionStats = @import("section.zig").SectionStats;
@@ -43,6 +44,9 @@ pub const Waypoint = struct {
     type_name: ?[]const u8 = null,
     /// `<time>`: the cutoff at this checkpoint.
     epoch_s: ?i64 = null,
+    /// The offset `<time>` was written with: 0 for `Z`. It puts the race on its local clock, for
+    /// the night slowdown, and `waypoint_write` writes it back.
+    utc_offset_s: i32 = 0,
     /// `<stopDuration>`: the planned stop here.
     stop_s: ?u32 = null,
 
@@ -54,6 +58,14 @@ pub const Waypoint = struct {
         if (self.symbol) |symbol| allocator.free(symbol);
         if (self.type_name) |type_name| allocator.free(type_name);
         self.* = undefined;
+    }
+
+    /// `epoch_s` on the race's local clock (shifted by `utc_offset_s`), or null without a time.
+    /// What the circadian model reads: its low is at 03:30 on the wall clock.
+    pub fn clock_local_s(self: *const Waypoint) ?i64 {
+        assert(@abs(self.utc_offset_s) <= time.utc_offset_s_max);
+        const epoch_s = self.epoch_s orelse return null;
+        return epoch_s + self.utc_offset_s;
     }
 
     fn is_type(self: *const Waypoint, type_name: []const u8) bool {

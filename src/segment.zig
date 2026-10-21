@@ -24,7 +24,8 @@ pub const SegmentMetrics = struct {
 pub const Model = struct {
     pace_s_per_km: f64,
     fatigue_coefficient: f64,
-    /// The race start epoch, or null for a neutral circadian factor.
+    /// The race start on its local clock (`Waypoint.clock_local_s`), or null for a neutral
+    /// circadian factor.
     clock_start_s: ?i64,
 };
 

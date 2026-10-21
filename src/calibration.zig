@@ -131,7 +131,7 @@ pub fn intervals_compute(
     const model: segment.Model = .{
         .pace_s_per_km = settings.pace_base_s_per_km,
         .fatigue_coefficient = settings.fatigue_coefficient,
-        .clock_start_s = boundaries[0].epoch_s,
+        .clock_start_s = boundaries[0].clock_local_s(),
     };
     // Fatigue and the clock carry across intervals in race order, so each interval pays for
     // the effort before it.
@@ -393,7 +393,7 @@ pub fn plan_compute(
     const model: segment.Model = .{
         .pace_s_per_km = settings.pace_base_s_per_km,
         .fatigue_coefficient = settings.fatigue_coefficient,
-        .clock_start_s = origin.epoch_s,
+        .clock_start_s = ranges[0].start.clock_local_s(),
     };
     var progress: segment.Progress = .{};
     var departure_s: f64 = 0.0;
@@ -529,7 +529,7 @@ pub fn recalibrate(
     var model: segment.Model = .{
         .pace_s_per_km = settings.pace_base_s_per_km,
         .fatigue_coefficient = settings.fatigue_coefficient,
-        .clock_start_s = boundaries[0].epoch_s,
+        .clock_start_s = boundaries[0].clock_local_s(),
     };
     var progress: segment.Progress = .{};
     const replayed = replay(trace, ranges, index_current, model, settings, &progress);
@@ -1032,6 +1032,37 @@ test "plan_compute: epochs and cutoff margins" {
     // No cutoff at the Arrival: an arrival time, but no margin.
     try testing.expect(plan[3].epoch_s_arrival != null);
     try testing.expectEqual(@as(?f64, null), plan[3].margin_s);
+}
+
+test "plan_compute: the night slowdown follows the start's local clock, not UTC" {
+    var trace = try route_flat(testing.allocator);
+    defer trace.deinit(testing.allocator);
+    // 03:00 UTC, in the circadian low (03:30 ± 2 h on the clock it is read on).
+    const night_utc_s: i64 = 19_675 * 86_400 + 3 * 3600;
+    var utc = route_waypoints;
+    utc[0].epoch_s = night_utc_s;
+    // The same instant at UTC+2 reads 05:00: near the edge of the low, so faster.
+    var paris = utc;
+    paris[0].utc_offset_s = 7200;
+    // Two hours earlier at UTC+2 reads 03:00 again: the same local clock as `utc`.
+    var paris_early = paris;
+    paris_early[0].epoch_s = night_utc_s - 7200;
+
+    const plan_utc = try plan_route(&trace, &utc, &settings_no_stop);
+    defer testing.allocator.free(plan_utc);
+    const plan_paris = try plan_route(&trace, &paris, &settings_no_stop);
+    defer testing.allocator.free(plan_paris);
+    const plan_paris_early = try plan_route(&trace, &paris_early, &settings_no_stop);
+    defer testing.allocator.free(plan_paris_early);
+
+    const finish = plan_utc.len - 1;
+    try testing.expect(plan_paris[finish].duration_s_arrival < plan_utc[finish].duration_s_arrival);
+    // Same local clock, same plan, whatever the instant: the model runs on the wall clock.
+    for (plan_utc, plan_paris_early) |a, b| {
+        try testing.expectEqual(a.duration_s_arrival, b.duration_s_arrival);
+    }
+    // The epochs stay instants: the offset moves the clock, not the time.
+    try testing.expectEqual(@as(?i64, night_utc_s), plan_paris[0].epoch_s_arrival);
 }
 
 test "plan_compute: no start time, no epochs and no margins" {

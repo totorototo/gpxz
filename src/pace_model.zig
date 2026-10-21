@@ -81,18 +81,19 @@ pub fn fatigue_factor(distance_km_effort: f64, coefficient: f64) f64 {
     return factor;
 }
 
-/// The circadian low: a half-cosine bump centered at 3:30 UTC, 2 hours wide on each side,
-/// peaking at a 15% slowdown. GPX timestamps are UTC, so a runner at UTC+2 meets the peak
-/// around 5:30 local time.
+/// The circadian low: a half-cosine bump centered at 3:30 on the race's local clock, 2 hours
+/// wide on each side, peaking at a 15% slowdown. The clock is local when the start's `<time>`
+/// carries its offset (`+02:00`); a time written in UTC (`Z`) puts the low at 3:30 UTC.
 const circadian_center_h = 3.5;
 const circadian_half_width_h = 2.0;
 const circadian_penalty_max = 0.15;
 
-/// Returns the circadian slowdown (from 1 to 1.15) at Unix time `epoch_s`.
-pub fn circadian_factor(epoch_s: i64) f64 {
-    const hours_utc = @mod(@as(f64, @floatFromInt(epoch_s)) / 3600.0, 24.0);
-    assert(hours_utc >= 0 and hours_utc < 24.0);
-    const offset_h = hours_utc - circadian_center_h;
+/// Returns the circadian slowdown (from 1 to 1.15) at `clock_s`, epoch seconds on the local
+/// clock (`epoch_s + utc_offset_s`).
+pub fn circadian_factor(clock_s: i64) f64 {
+    const hours = @mod(@as(f64, @floatFromInt(clock_s)) / 3600.0, 24.0);
+    assert(hours >= 0 and hours < 24.0);
+    const offset_h = hours - circadian_center_h;
     if (@abs(offset_h) >= circadian_half_width_h) return 1.0;
 
     const position = offset_h / circadian_half_width_h;
@@ -111,8 +112,8 @@ pub const PaceFactors = struct {
 };
 
 /// Returns one point's pace factors: the single place the slope term joins the others.
-/// `slope` is rise over run. `clock_start_s` is the race start epoch, or null for a neutral
-/// circadian factor; `elapsed_s` is added to it. `weather` is `weather_factor()` for the
+/// `slope` is rise over run. `clock_start_s` is the race start on its local clock, or null for a
+/// neutral circadian factor; `elapsed_s` is added to it. `weather` is `weather_factor()` for the
 /// segment, computed once by the caller since weather is constant across a segment.
 pub fn factors_compute(
     slope: f64,

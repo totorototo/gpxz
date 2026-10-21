@@ -13,10 +13,25 @@ const date_time_length = 19;
 
 const seconds_per_day = 86_400;
 
+/// Real UTC offsets run from -12:00 to +14:00; the reader accepts ±14:00.
+pub const utc_offset_s_max: i32 = 14 * 3600;
+
+/// A timestamp as written: the instant, and the offset of the clock that wrote it (0 for `Z`).
+/// The offset is what makes a time local: `epoch_s + utc_offset_s` is the wall clock's reading.
+pub const Timestamp = struct {
+    epoch_s: i64,
+    utc_offset_s: i32 = 0,
+};
+
 /// Returns the Unix epoch seconds of an ISO 8601 UTC or offset timestamp, such as
 /// `2025-11-20T12:00:00Z` or `2025-11-20T12:00:00+01:00`. Fractional seconds are not accepted.
 /// The bytes come from a GPX file, so anything else is an error, never an assertion.
 pub fn iso8601_to_epoch_s(text: []const u8) error{InvalidFormat}!i64 {
+    return (try iso8601_parse(text)).epoch_s;
+}
+
+/// `iso8601_to_epoch_s`, keeping the offset.
+pub fn iso8601_parse(text: []const u8) error{InvalidFormat}!Timestamp {
     if (text.len < timestamp_length_min or text.len > timestamp_length_max) {
         return error.InvalidFormat;
     }
@@ -37,7 +52,8 @@ pub fn iso8601_to_epoch_s(text: []const u8) error{InvalidFormat}!i64 {
 
     const offset_s = try zone_offset_s(text[date_time_length..]);
     const epoch_s = civil_to_epoch_s(year, month, day) + hour * 3600 + minute * 60 + second;
-    return epoch_s - offset_s;
+    assert(@abs(offset_s) <= utc_offset_s_max);
+    return .{ .epoch_s = epoch_s - offset_s, .utc_offset_s = @intCast(offset_s) };
 }
 
 /// The first second `epoch_s_to_iso8601` can write: `0000-01-01T00:00:00Z`.
@@ -70,6 +86,40 @@ pub fn epoch_s_to_iso8601(epoch_s: i64) error{OutOfRange}![timestamp_length_min]
         },
     ) catch unreachable; // Four-digit year, so the text is always 20 bytes.
     assert(written.len == timestamp_length_min);
+    return text;
+}
+
+/// A timestamp's text, up to `YYYY-MM-DDTHH:MM:SS+HH:MM`.
+pub const TimestampText = struct {
+    bytes: [timestamp_length_max]u8,
+    len: u8,
+
+    pub fn slice(self: *const TimestampText) []const u8 {
+        assert(self.len == timestamp_length_min or self.len == timestamp_length_max);
+        return self.bytes[0..self.len];
+    }
+};
+
+/// Returns `timestamp` as the wall clock at its offset wrote it: `…Z` for offset 0, so a UTC
+/// time reads back byte for byte, else `…+HH:MM`. `iso8601_parse` reads either back to the same
+/// timestamp. An offset is whole minutes within ±14:00, and the local time must fit four digits
+/// of year: either is an error, since both come from a caller's data.
+pub fn timestamp_to_iso8601(timestamp: Timestamp) error{OutOfRange}!TimestampText {
+    const offset_s = timestamp.utc_offset_s;
+    if (@abs(offset_s) > utc_offset_s_max or @mod(offset_s, 60) != 0) return error.OutOfRange;
+    var text: TimestampText = .{ .bytes = undefined, .len = timestamp_length_min };
+    const local = try epoch_s_to_iso8601(timestamp.epoch_s + offset_s);
+    @memcpy(text.bytes[0..timestamp_length_min], &local);
+    if (offset_s == 0) return text;
+
+    const offset_minutes: u32 = @intCast(@abs(offset_s) / 60);
+    const zone = std.fmt.bufPrint(
+        text.bytes[date_time_length..],
+        "{c}{d:0>2}:{d:0>2}",
+        .{ @as(u8, if (offset_s < 0) '-' else '+'), offset_minutes / 60, offset_minutes % 60 },
+    ) catch unreachable; // Six bytes: a sign, two digits, a colon, two digits.
+    assert(zone.len == timestamp_length_max - date_time_length);
+    text.len = timestamp_length_max;
     return text;
 }
 
@@ -325,5 +375,50 @@ test "epoch_s_to_iso8601: the days around the leap days of 1900, 2000 and 2100" 
             const epoch_s = start_s + @as(i64, @intCast(day)) * seconds_per_day;
             try testing.expectEqualStrings(expected, &(try epoch_s_to_iso8601(epoch_s)));
         }
+    }
+}
+
+test "iso8601_parse: keeps the offset; Z is 0" {
+    const utc = try iso8601_parse("2026-08-21T03:00:00Z");
+    try testing.expectEqual(@as(i32, 0), utc.utc_offset_s);
+    const paris = try iso8601_parse("2026-08-21T05:00:00+02:00");
+    try testing.expectEqual(utc.epoch_s, paris.epoch_s);
+    try testing.expectEqual(@as(i32, 7200), paris.utc_offset_s);
+    const boulder = try iso8601_parse("2026-08-20T21:00:00-06:00");
+    try testing.expectEqual(utc.epoch_s, boulder.epoch_s);
+    try testing.expectEqual(@as(i32, -21600), boulder.utc_offset_s);
+    const kiritimati = try iso8601_parse("2026-08-21T17:00:00+14:00");
+    try testing.expectEqual(@as(i32, utc_offset_s_max), kiritimati.utc_offset_s);
+}
+
+test "timestamp_to_iso8601: Z for UTC, the offset otherwise, and back" {
+    const epoch_s = try iso8601_to_epoch_s("2026-08-21T03:00:00Z");
+    const utc = try timestamp_to_iso8601(.{ .epoch_s = epoch_s });
+    try testing.expectEqualStrings("2026-08-21T03:00:00Z", utc.slice());
+    const paris = try timestamp_to_iso8601(.{ .epoch_s = epoch_s, .utc_offset_s = 7200 });
+    try testing.expectEqualStrings("2026-08-21T05:00:00+02:00", paris.slice());
+    const india = try timestamp_to_iso8601(.{ .epoch_s = epoch_s, .utc_offset_s = 19800 });
+    try testing.expectEqualStrings("2026-08-21T08:30:00+05:30", india.slice());
+    const boulder = try timestamp_to_iso8601(.{ .epoch_s = epoch_s, .utc_offset_s = -21600 });
+    try testing.expectEqualStrings("2026-08-20T21:00:00-06:00", boulder.slice());
+
+    // Paired: what is written reads back to the same instant and offset.
+    for ([_]i32{ 0, 7200, 19800, -21600, utc_offset_s_max, -utc_offset_s_max }) |offset_s| {
+        const text = try timestamp_to_iso8601(.{ .epoch_s = epoch_s, .utc_offset_s = offset_s });
+        const back = try iso8601_parse(text.slice());
+        try testing.expectEqual(epoch_s, back.epoch_s);
+        try testing.expectEqual(offset_s, back.utc_offset_s);
+    }
+}
+
+test "timestamp_to_iso8601: an offset past 14:00 or not in whole minutes is OutOfRange" {
+    const cases = [_]Timestamp{
+        .{ .epoch_s = 0, .utc_offset_s = utc_offset_s_max + 60 },
+        .{ .epoch_s = 0, .utc_offset_s = -utc_offset_s_max - 60 },
+        .{ .epoch_s = 0, .utc_offset_s = 7230 },
+        .{ .epoch_s = epoch_s_max, .utc_offset_s = 3600 },
+    };
+    for (cases) |timestamp| {
+        try testing.expectError(error.OutOfRange, timestamp_to_iso8601(timestamp));
     }
 }
