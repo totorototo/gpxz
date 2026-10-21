@@ -47,11 +47,18 @@ latest release in their `zig/build.zig.zon` and build it to WebAssembly through 
     `gps_point.zig`'s `latitude_index`, `longitude_index`, `elevation_index`.
   - `gps_point.zig` (Haversine, bearing), `elevation.zig` (denoised D+/D-), `extrema.zig`
     (AMPD peaks and valleys), `climbs.zig` (Garmin-style qualification; descents as the mirrored profile's climbs), `simplify.zig`
-    (Douglas-Peucker), `time.zig` (ISO 8601 ↔ epoch).
+    (Douglas-Peucker), `time.zig` (ISO 8601 ↔ epoch, keeping the UTC offset:
+    `iso8601_parse`, `timestamp_to_iso8601`).
   - `leg.zig`, `section.zig`, `stage.zig`: stats between waypoints; sections and stages are
     thin wrappers over `calibration.zig` (a-priori interval stats and live recalibration).
-  - `minetti.zig` (slope cost), `pace_model.zig` (slope × fatigue × circadian × weather),
+  - `minetti.zig` (slope cost: running, blended into walking from 15% to 25% grade, where
+    trail runners power-hike), `pace_model.zig` (slope × fatigue × circadian × weather; the
+    circadian low is at 03:30 on the start's local clock, `Waypoint.clock_local_s`, so a GPX
+    whose times carry their offset gets the night right, and one in UTC keeps 03:30 UTC),
     `segment.zig` (per-point metrics).
+- **The model's numbers are a contract**: any change to the durations makes every plan.json
+  built before it stale (Retrace refuses it with `PlanStale`, "rebuild it in Regimen"). That is
+  intended, but say so in the release, and regenerate the apps' plan fixtures.
 - **Names are JSON keys**: struct fields serialize as-is in `--json` and reach JavaScript
   through Zigar in the apps, so renaming a public field changes both outputs.
 - **Releases are `vX.Y.Z` tags**, with `.version` in `build.zig.zon` to match. The apps' CI
