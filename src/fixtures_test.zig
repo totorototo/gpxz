@@ -196,6 +196,84 @@ test "grp-160-2026.gpx: the largest file, two LifeBases, three stages" {
     });
 }
 
+// The GRP 160 set: original → extended → plan (testdata/grp-160-2026/README.md).
+
+const set_original = @embedFile("grp-160-2026.original.gpx");
+const set_extended = @embedFile("grp-160-2026.extended.gpx");
+const set_plan = @embedFile("grp-160-2026.plan.json");
+
+test "grp-160-2026/original.gpx: the race director's file, 52 untyped waypoints" {
+    var data = try gpxz.parse(testing.allocator, set_original, &.{});
+    defer data.deinit(testing.allocator);
+    // Counted in the file text: 30899 <trkpt, 52 <wpt, no <type> and no <time> in them.
+    try testing.expectEqual(@as(usize, 30899), data.points_full_resolution.len / 3);
+    try testing.expectEqual(@as(usize, 52), data.waypoints.len);
+    for (data.waypoints) |waypoint| {
+        try testing.expectEqual(@as(?[]const u8, null), waypoint.type_name);
+        try testing.expectEqual(@as(?i64, null), waypoint.epoch_s);
+    }
+    // No Start and Arrival: no plan to make.
+    try testing.expect(data.plan == null or data.plan.?.len == 0);
+}
+
+test "grp-160-2026/extended.gpx: the original with the checkpoints, on the race's clock" {
+    var data = try gpxz.parse(testing.allocator, set_extended, &.{});
+    defer data.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 15), data.waypoints.len);
+    try testing.expectEqualStrings("Start", data.waypoints[0].type_name.?);
+    try testing.expectEqualStrings("Arrival", data.waypoints[14].type_name.?);
+    // 05:00+02:00 and 07:00+02:00 two days later, converted with Python.
+    try testing.expectEqual(@as(?i64, 1787281200), data.waypoints[0].epoch_s);
+    try testing.expectEqual(@as(?i64, 1787461200), data.waypoints[14].epoch_s);
+    for (data.waypoints) |waypoint| try testing.expectEqual(@as(i32, 7200), waypoint.utc_offset_s);
+
+    // It is exactly what Waymark's export makes of the original: gpxz.waypoints_replace with
+    // these waypoints. Paired with the parse above, so the recipe in the README holds.
+    const remade = try gpxz.waypoints_replace(testing.allocator, set_original, data.waypoints);
+    defer testing.allocator.free(remade);
+    try testing.expectEqualStrings(set_extended, remade);
+}
+
+test "grp-160-2026/plan.json: Regimen's plan for the extended file, as gpxz builds it now" {
+    var parsed = try gpxz.plan_read(testing.allocator, set_plan);
+    defer parsed.deinit();
+    const plan = &parsed.value;
+    try testing.expect(gpxz.plan.course_matches(plan, set_extended));
+    try testing.expect(!gpxz.plan.course_matches(plan, set_original));
+    try testing.expectEqual(@as(usize, 15), plan.entries.len);
+
+    // Rebuilt from the extended file with the plan's own model and fueling: byte for byte, so a
+    // change to the model fails here first. Regenerate the plan then (README).
+    const settings: gpxz.Settings = .{
+        .pace_base_s_per_km = plan.model.pace_base_s_per_km,
+        .fatigue_coefficient = plan.model.fatigue_coefficient,
+        .life_base_stop_s = plan.model.life_base_stop_s,
+    };
+    var data = try gpxz.parse(testing.allocator, set_extended, &settings);
+    defer data.deinit(testing.allocator);
+    const entries = data.plan.?;
+    const fueling = plan.model.fueling.?;
+    const times = try testing.allocator.alloc(gpxz.fueling.Times, entries.len);
+    defer testing.allocator.free(times);
+    gpxz.fueling.times_from_entries(entries, times);
+    const carry = try testing.allocator.alloc(?gpxz.fueling.Carry, entries.len);
+    defer testing.allocator.free(carry);
+    gpxz.fueling.carry_compute(times, &fueling, carry);
+    const fuel_plan: gpxz.fueling.FuelPlan = .{ .fueling = fueling, .carry = carry };
+    const rebuilt = gpxz.plan_build(
+        set_extended,
+        data.metadata.name,
+        data.trace.distance_m,
+        entries,
+        &settings,
+        &fuel_plan,
+    );
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try gpxz.plan_write(&out.writer, &rebuilt);
+    try testing.expectEqualStrings(set_plan, out.written());
+}
+
 /// Reads the waypoints of `bytes`, writes them back and reads again: the same route and the
 /// same plan, and nothing but the waypoints touched.
 fn round_trip_check(bytes: []const u8) !void {
