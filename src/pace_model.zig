@@ -23,6 +23,19 @@ pub const life_base_recovery_ratio = 0.20;
 /// sets none.
 pub const life_base_stop_s_default: u32 = 3600;
 
+/// The settings a runner may give, the same in every app. Outside them the model's numbers
+/// stop meaning anything: under 1:00/km is no run, over 1 h/km no race, and past 0.05 the
+/// fatigue factor reaches exp(0.05 × 400) ≈ 5e8 on a long course.
+pub const pace_base_s_per_km_min = 60.0;
+pub const pace_base_s_per_km_max = 3600.0;
+pub const fatigue_coefficient_max = 0.05;
+pub const life_base_stop_s_max: u32 = 24 * 3600;
+
+pub const SettingsError = error{
+    /// A setting is out of its range, or isn't a finite number.
+    SettingsInvalid,
+};
+
 /// The runner's inputs to the pace model. The defaults are the "Moderate" presets.
 pub const Settings = struct {
     /// The flat-terrain pace.
@@ -32,11 +45,28 @@ pub const Settings = struct {
     life_base_stop_s: u32 = life_base_stop_s_default,
     weather: WeatherLookup = .empty,
 
+    /// The one check for settings from outside gpxz (a form, a plan.json, a relay message).
+    /// Every public entry point that takes settings calls it and returns its error: in the
+    /// apps' ReleaseSmall WASM a failed assert is undefined behaviour, not a crash.
+    pub fn validate(settings: *const Settings) SettingsError!void {
+        // Written as "inside the range" so a NaN, which compares false, is refused.
+        const pace = settings.pace_base_s_per_km;
+        if (!(pace >= pace_base_s_per_km_min and pace <= pace_base_s_per_km_max)) {
+            return error.SettingsInvalid;
+        }
+        const fatigue = settings.fatigue_coefficient;
+        if (!(fatigue >= 0 and fatigue <= fatigue_coefficient_max)) return error.SettingsInvalid;
+        if (settings.life_base_stop_s > life_base_stop_s_max) return error.SettingsInvalid;
+        if (settings.weather.names.len != settings.weather.values.len) {
+            return error.SettingsInvalid;
+        }
+    }
+
+    /// For settings already validated: the internal functions' precondition.
     pub fn assert_valid(settings: *const Settings) void {
-        assert(settings.pace_base_s_per_km > 0 and std.math.isFinite(settings.pace_base_s_per_km));
-        assert(settings.fatigue_coefficient >= 0);
+        settings.validate() catch unreachable;
+        assert(std.math.isFinite(settings.pace_base_s_per_km));
         assert(std.math.isFinite(settings.fatigue_coefficient));
-        assert(settings.weather.names.len == settings.weather.values.len);
     }
 };
 
@@ -226,6 +256,46 @@ pub const WeatherLookup = struct {
         return weather_factor(self.find(name));
     }
 };
+
+test "Settings.validate: the defaults and both ends of every range" {
+    const defaults: Settings = .{};
+    try defaults.validate();
+    const low: Settings = .{
+        .pace_base_s_per_km = pace_base_s_per_km_min,
+        .fatigue_coefficient = 0,
+        .life_base_stop_s = 0,
+    };
+    try low.validate();
+    const high: Settings = .{
+        .pace_base_s_per_km = pace_base_s_per_km_max,
+        .fatigue_coefficient = fatigue_coefficient_max,
+        .life_base_stop_s = life_base_stop_s_max,
+    };
+    try high.validate();
+    high.assert_valid();
+}
+
+test "Settings.validate: past either end, NaN, infinity and mismatched weather" {
+    const nan = std.math.nan(f64);
+    const inf = std.math.inf(f64);
+    const cases = [_]Settings{
+        .{ .pace_base_s_per_km = pace_base_s_per_km_min - 1 },
+        .{ .pace_base_s_per_km = pace_base_s_per_km_max + 1 },
+        .{ .pace_base_s_per_km = 0 },
+        .{ .pace_base_s_per_km = -500 },
+        .{ .pace_base_s_per_km = nan },
+        .{ .pace_base_s_per_km = inf },
+        .{ .fatigue_coefficient = -0.001 },
+        .{ .fatigue_coefficient = fatigue_coefficient_max + 0.001 },
+        .{ .fatigue_coefficient = nan },
+        .{ .fatigue_coefficient = inf },
+        .{ .life_base_stop_s = life_base_stop_s_max + 1 },
+        .{ .weather = .{ .names = &.{"Refuge"}, .values = &.{} } },
+    };
+    for (cases) |settings| {
+        try testing.expectError(error.SettingsInvalid, settings.validate());
+    }
+}
 
 test "fatigue_factor: no effort is 1" {
     try testing.expectEqual(@as(f64, 1.0), fatigue_factor(0.0, fatigue_coefficient_default));

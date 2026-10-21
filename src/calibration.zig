@@ -119,7 +119,7 @@ pub fn intervals_compute(
     waypoints: []const Waypoint,
     settings: *const pace_model.Settings,
 ) !?[]Stats {
-    settings.assert_valid();
+    try settings.validate();
     const boundaries = try boundaries_collect(allocator, waypoints, kind);
     defer allocator.free(boundaries);
     if (boundaries.len < 2) return null;
@@ -375,7 +375,7 @@ pub fn plan_compute(
     waypoints: []const Waypoint,
     settings: *const pace_model.Settings,
 ) !?[]PlanEntry {
-    settings.assert_valid();
+    try settings.validate();
     const boundaries = try boundaries_collect(allocator, waypoints, .section);
     defer allocator.free(boundaries);
     if (boundaries.len < 2) return null;
@@ -517,7 +517,7 @@ pub fn recalibrate(
     elapsed_s_actual: f64,
     settings: *const pace_model.Settings,
 ) !?Recalibration {
-    settings.assert_valid();
+    try settings.validate();
     assert(elapsed_s_actual >= 0 and std.math.isFinite(elapsed_s_actual));
     assert(trace.points.len == 0 or index_current < trace.points.len);
     const boundaries = try boundaries_collect(allocator, waypoints, kind);
