@@ -120,8 +120,11 @@ pub fn waypoint_write(
     if (waypoint.symbol) |text| try text_element_write(writer, "sym", text, newline);
     if (waypoint.type_name) |text| try text_element_write(writer, "type", text, newline);
     if (waypoint.epoch_s) |epoch_s| {
-        const timestamp = time.epoch_s_to_iso8601(epoch_s) catch return error.TimeOutOfRange;
-        try writer.print("  <time>{s}</time>{s}", .{ &timestamp, newline });
+        const timestamp = time.timestamp_to_iso8601(.{
+            .epoch_s = epoch_s,
+            .utc_offset_s = waypoint.utc_offset_s,
+        }) catch return error.TimeOutOfRange;
+        try writer.print("  <time>{s}</time>{s}", .{ timestamp.slice(), newline });
     }
     if (waypoint.stop_s) |stop_s| {
         try writer.print("  <stopDuration>{d}</stopDuration>{s}", .{ stop_s, newline });
@@ -657,4 +660,26 @@ test "waypoints_replace: waypoints read from a file, written, and read again are
         try testing.expectEqual(before.latitude, after.latitude);
         try testing.expectEqualStrings(before.name, after.name);
     }
+}
+
+test "waypoint_write: a time keeps its offset, and Z stays Z" {
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const paris: Waypoint = .{
+        .latitude = 42.8,
+        .longitude = 0.3,
+        .name = "Start",
+        .epoch_s = try time.iso8601_to_epoch_s("2026-08-21T03:00:00Z"),
+        .utc_offset_s = 7200,
+    };
+    try waypoint_write(&writer, &paris, "\n");
+    const local = "<time>2026-08-21T05:00:00+02:00</time>";
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), local) != null);
+
+    writer = .fixed(&buffer);
+    var utc = paris;
+    utc.utc_offset_s = 0;
+    try waypoint_write(&writer, &utc, "\n");
+    const zulu = "<time>2026-08-21T03:00:00Z</time>";
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), zulu) != null);
 }
