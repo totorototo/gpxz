@@ -1,11 +1,12 @@
 .{
     .name = .gpxz,
-    .version = "0.3.0",
+    .version = "0.3.1",
     .fingerprint = 0x8472132ae20ee37a,
     .minimum_zig_version = "0.17.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "LICENSE",
     },
 }
